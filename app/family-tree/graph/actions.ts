@@ -2,13 +2,13 @@
 
 import { createClient } from "@/lib/supabase/server";
 
-// Node payload used by both 2D and 3D graph views.
 export interface FamilyMemberNode {
   id: number;
   name: string;
   generation: number | null;
   sibling_order: number | null;
   father_id: number | null;
+  mom_id: number | null;
   gender: "男" | "女" | null;
   official_position: string | null;
   is_alive: boolean;
@@ -19,24 +19,117 @@ export interface FamilyMemberNode {
   residence_place: string | null;
 }
 
+export type ParentRole = "father" | "mother" | "parent";
+export type RelationKind = "biological" | "adoptive" | "step" | "guardian" | "unknown";
+
+export interface FamilyRelationship {
+  id?: number;
+  child_id: number;
+  parent_id: number;
+  parent_role: ParentRole;
+  relation_kind: RelationKind;
+  is_primary: boolean;
+  notes: string | null;
+}
+
+export interface FamilyGraphDataset {
+  members: FamilyMemberNode[];
+  relationships: FamilyRelationship[];
+}
+
 export interface FetchGraphResult {
-  data: FamilyMemberNode[];
+  data: FamilyGraphDataset;
   error: string | null;
 }
 
-// Load full relationship data for graph rendering.
 export async function fetchAllFamilyMembers(): Promise<FetchGraphResult> {
   const supabase = await createClient();
 
   const { data, error } = await supabase
     .from("family_members")
-    .select("id, name, generation, sibling_order, father_id, gender, official_position, is_alive, spouse, remarks, birthday, death_date, residence_place")
+    .select("id, name, generation, sibling_order, father_id, mom_id, gender, official_position, is_alive, spouse, remarks, birthday, death_date, residence_place")
     .order("generation", { ascending: true })
     .order("sibling_order", { ascending: true });
 
   if (error) {
-    return { data: [], error: error.message };
+    return { data: { members: [], relationships: [] }, error: error.message };
   }
 
-  return { data: data || [], error: null };
+  const members = (data || []) as FamilyMemberNode[];
+  const fallbackRelationships = buildFallbackRelationships(members);
+
+  const { data: relationshipData, error: relationshipError } = await supabase
+    .from("family_member_relationships")
+    .select("id, child_id, parent_id, parent_role, relation_kind, is_primary, notes");
+
+  if (relationshipError) {
+    return {
+      data: { members, relationships: fallbackRelationships },
+      error: null,
+    };
+  }
+
+  return {
+    data: {
+      members,
+      relationships: mergeRelationships(
+        (relationshipData || []) as FamilyRelationship[],
+        fallbackRelationships
+      ),
+    },
+    error: null,
+  };
+}
+
+function buildFallbackRelationships(members: FamilyMemberNode[]): FamilyRelationship[] {
+  return members.flatMap((member) => {
+    const relationships: FamilyRelationship[] = [];
+
+    if (member.father_id) {
+      relationships.push({
+        child_id: member.id,
+        parent_id: member.father_id,
+        parent_role: "father",
+        relation_kind: "biological",
+        is_primary: true,
+        notes: null,
+      });
+    }
+
+    if (member.mom_id) {
+      relationships.push({
+        child_id: member.id,
+        parent_id: member.mom_id,
+        parent_role: "mother",
+        relation_kind: "biological",
+        is_primary: true,
+        notes: null,
+      });
+    }
+
+    return relationships;
+  });
+}
+
+function mergeRelationships(
+  relationships: FamilyRelationship[],
+  fallbackRelationships: FamilyRelationship[]
+): FamilyRelationship[] {
+  const merged = new Map<string, FamilyRelationship>();
+
+  relationships.forEach((relationship) => {
+    merged.set(getRelationshipKey(relationship), relationship);
+  });
+
+  fallbackRelationships.forEach((relationship) => {
+    if (!merged.has(getRelationshipKey(relationship))) {
+      merged.set(getRelationshipKey(relationship), relationship);
+    }
+  });
+
+  return Array.from(merged.values());
+}
+
+function getRelationshipKey(relationship: FamilyRelationship): string {
+  return `${relationship.child_id}-${relationship.parent_id}-${relationship.parent_role}`;
 }

@@ -23,7 +23,7 @@ async function Graph3DLoader() {
     );
   }
 
-  if (data.length === 0) {
+  if (data.members.length === 0) {
     return (
       <div className="flex items-center justify-center h-[600px] border rounded-lg bg-muted/50 text-muted-foreground p-8 text-center">
         <p>暂无族谱数据，请先添加成员。</p>
@@ -31,7 +31,7 @@ async function Graph3DLoader() {
     );
   }
 
-  return <FamilyForceGraph data={data} />;
+  return <FamilyForceGraph data={data.members} relationships={data.relationships} />;
 }
 
 export default function FamilyTreeGraph3DPage() {

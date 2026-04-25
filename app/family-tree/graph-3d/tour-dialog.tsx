@@ -11,7 +11,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
-import { FamilyMemberNode } from "../graph/actions";
+import type { FamilyMemberNode, FamilyRelationship } from "../graph/actions";
 import { MemberSelect } from "./member-select";
 import { findShortestPath } from "./tour-utils";
 import { AlertCircle } from "lucide-react";
@@ -21,6 +21,7 @@ interface TourDialogProps {
   isOpen: boolean;
   onOpenChange: (open: boolean) => void;
   members: FamilyMemberNode[];
+  relationships?: FamilyRelationship[];
   onStartTour: (path: FamilyMemberNode[]) => void;
 }
 
@@ -28,6 +29,7 @@ export function TourDialog({
   isOpen,
   onOpenChange,
   members,
+  relationships,
   onStartTour,
 }: TourDialogProps) {
   const [startId, setStartId] = useState<number | null>(null);
@@ -41,7 +43,7 @@ export function TourDialog({
       return;
     }
 
-    const path = findShortestPath(members, startId, endId);
+    const path = findShortestPath(members, startId, endId, relationships);
     if (!path || path.length === 0) {
       setError("无法找到两点之间的路径");
       return;

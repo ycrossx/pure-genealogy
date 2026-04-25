@@ -1,83 +1,149 @@
 "use client";
 
-import { useCallback, useMemo, useState, useRef, useEffect, memo, type MouseEvent } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MouseEvent,
+} from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
-  ReactFlow,
-  Controls,
   Background,
-  useNodesState,
-  useEdgesState,
-  useReactFlow,
-  ReactFlowProvider,
-  Panel,
-  type Node,
-  type Edge,
   BackgroundVariant,
-  type NodeTypes,
+  Controls,
   getNodesBounds,
   getViewportForBounds,
+  Handle,
+  Panel,
+  Position,
+  ReactFlow,
+  ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
+  useReactFlow,
+  type Edge,
+  type Node,
+  type NodeProps,
+  type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import dagre from "@dagrejs/dagre";
+import { toPng } from "html-to-image";
+import {
+  ChevronsDown,
+  Download,
+  Lock,
+  Maximize,
+  Minimize,
+  MoreVertical,
+  RotateCcw,
+  Search,
+  Unlock,
+  X,
+} from "lucide-react";
+
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
-  RotateCcw,
-  Maximize,
-  Minimize,
-  Search,
-  X,
-  Download,
-  ChevronsDown,
-  Lock,
-  Unlock,
-  MoreVertical,
-} from "lucide-react";
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { toPng } from "html-to-image";
+import { cn } from "@/lib/utils";
 import { FamilyMemberNodeType, type FamilyNodeData } from "./family-node";
 import { GenerationNodeType } from "./generation-node";
 import { toChineseNum } from "./utils/chinese-num";
 import { getBranchBaseColor, generateBranchColor, type HSLColor } from "./utils/colors";
 import { FlowingEdge } from "./flowing-edge";
-import type { FamilyMemberNode } from "./actions";
-import dagre from "@dagrejs/dagre";
-
+import type { FamilyGraphDataset, FamilyMemberNode, FamilyRelationship, RelationKind } from "./actions";
+import {
+  buildChildrenMap,
+  getParentRelations,
+  getRelationEdgeId,
+  toParentRelation,
+  type ParentRelation,
+} from "./relation-utils";
 import { MemberDetailDialog } from "../member-detail-dialog";
+
+const NODE_WIDTH = 160;
+const NODE_HEIGHT = 120;
+const FAMILY_NODE_WIDTH = 36;
+const FAMILY_NODE_HEIGHT = 24;
+const HORIZONTAL_GAP = 90;
+const VERTICAL_GAP = 120;
+const PICKER_PAGE_SIZE = 10;
+
+interface FamilyTreeGraphProps {
+  initialData: FamilyGraphDataset;
+}
+
+interface FamilyTreeGraphInnerProps {
+  dataset: FamilyGraphDataset;
+  onMemberClick?: (member: FamilyMemberNode) => void;
+}
+
+type AppliedFilter =
+  | { mode: "name"; name: string; upGenerations: number; downGenerations: number }
+  | { mode: "surname"; surname: string; downGenerations: number };
+
+interface FamilyUnit {
+  id: string;
+  parentIds: number[];
+  childIds: number[];
+  relationKinds: RelationKind[];
+}
+
+interface FamilyUnitNodeData extends Record<string, unknown> {
+  relationKinds: RelationKind[];
+}
+
+const FamilyUnitNode = memo(function FamilyUnitNode({ data }: NodeProps<Node<FamilyUnitNodeData>>) {
+  const hasAdoptive = data.relationKinds.includes("adoptive");
+  const hasNonBiological = data.relationKinds.some((kind) => kind !== "biological");
+
+  return (
+    <div
+      className={cn(
+        "relative flex h-6 w-9 items-center justify-center rounded-full border bg-background shadow-sm",
+        hasAdoptive
+          ? "border-violet-400 bg-violet-50 dark:bg-violet-950"
+          : hasNonBiological
+            ? "border-amber-400 bg-amber-50 dark:bg-amber-950"
+            : "border-muted-foreground/30"
+      )}
+      title={getRelationKindLabel(data.relationKinds)}
+    >
+      <Handle type="target" position={Position.Top} className="!h-2 !w-2 !bg-muted-foreground" />
+      <div className="h-2 w-2 rounded-full bg-muted-foreground/60" />
+      <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-muted-foreground" />
+    </div>
+  );
+});
 
 const nodeTypes: NodeTypes = {
   familyMember: FamilyMemberNodeType,
   generationLabel: GenerationNodeType,
+  familyUnit: FamilyUnitNode,
 };
 
 const edgeTypes = {
   flowing: FlowingEdge,
 };
 
-interface FamilyTreeGraphProps {
-  initialData: FamilyMemberNode[];
-}
-
-interface FamilyTreeGraphInnerProps {
-  initialData: FamilyMemberNode[];
-  onMemberClick?: (member: FamilyMemberNode) => void;
-}
-
-// 布局常量
-const NODE_WIDTH = 160;
-const NODE_HEIGHT = 120; // 增加高度以容纳配偶信息
-const HORIZONTAL_GAP = 80;
-const VERTICAL_GAP = 120;
-
-// 使用 dagre 进行自动布局，避免连线交叉
 function getLayoutedElements(
   members: FamilyMemberNode[],
-  childrenMap: Map<number, number[]>,
+  relationships: FamilyRelationship[],
   collapsedIds: Set<number>,
   highlightedId: number | null,
   onToggleCollapse?: (id: number) => void
@@ -86,77 +152,24 @@ function getLayoutedElements(
     return { nodes: [], edges: [] };
   }
 
-  // 1. 确定可见节点
-  const visibleMembers: FamilyMemberNode[] = [];
-  const memberMap = new Map(members.map((m) => [m.id, m]));
-
-  // 找到根节点（没有父亲，或父亲不在当前列表中）
-  const roots = members.filter(
-    (m) => !m.father_id || !memberMap.has(m.father_id)
+  const memberMap = new Map(members.map((member) => [member.id, member]));
+  const visibleMembers = applyCollapsedState(members, relationships, collapsedIds);
+  const visibleMemberIds = new Set(visibleMembers.map((member) => member.id));
+  const roots = visibleMembers.filter((member) =>
+    getParentRelations(member, relationships).every((relation) => !visibleMemberIds.has(relation.parentId))
   );
+  const rootGeneration = roots[0]?.generation || 1;
+  const childrenMap = buildChildrenMap(visibleMembers, relationships);
+  const memberBaseColorMap = buildBranchColorMap(roots, childrenMap);
 
-  // 获取根节点的代数，用于计算相对代数偏移量
-  const rootGeneration = roots.length > 0 ? (roots[0].generation || 1) : 1;
-
-  // 2. 计算支系颜色
-  // 逻辑：找到根节点的直接子节点（各大房头），分配颜色，并传递给后代
-  // 存储的是 HSL 对象，方便后续计算梯度
-  const memberBaseColorMap = new Map<number, HSLColor>();
-
-  // 辅助函数：递归设置颜色
-  const setDescendantColors = (memberId: number, color: HSLColor) => {
-    memberBaseColorMap.set(memberId, color);
-    const children = childrenMap.get(memberId) || [];
-    children.forEach(childId => {
-      if (!memberBaseColorMap.has(childId)) {
-        setDescendantColors(childId, color);
-      }
-    });
-  };
-
-  // 遍历所有根节点
-  roots.forEach(root => {
-    const children = childrenMap.get(root.id) || [];
-    children.forEach((childId, index) => {
-      const baseColor = getBranchBaseColor(index);
-      setDescendantColors(childId, baseColor);
-    });
-  });
-
-  // BFS 遍历生成可见列表
-  const queue = [...roots];
-  const visited = new Set<number>();
-
-  while (queue.length > 0) {
-    const member = queue.shift()!;
-    if (visited.has(member.id)) continue;
-
-    visited.add(member.id);
-    visibleMembers.push(member);
-
-    // 如果未折叠，则添加子节点
-    if (!collapsedIds.has(member.id)) {
-      const childIds = childrenMap.get(member.id) || [];
-      childIds.forEach((childId) => {
-        const child = memberMap.get(childId);
-        if (child) {
-          queue.push(child);
-        }
-      });
-    }
-  }
-
-  // 3. 创建 dagre 图
   const dagreGraph = new dagre.graphlib.Graph();
   dagreGraph.setDefaultEdgeLabel(() => ({}));
   dagreGraph.setGraph({
-    rankdir: "TB", // 从上到下布局
-    nodesep: HORIZONTAL_GAP, // 同层节点间距
-    ranksep: VERTICAL_GAP, // 层间距
-    // align: "UL", // Removed this to enable center balancing
+    rankdir: "TB",
+    nodesep: HORIZONTAL_GAP,
+    ranksep: VERTICAL_GAP,
   });
 
-  // 添加可见节点到 dagre 图
   visibleMembers.forEach((member) => {
     dagreGraph.setNode(String(member.id), {
       width: NODE_WIDTH,
@@ -164,72 +177,96 @@ function getLayoutedElements(
     });
   });
 
-  // 添加可见边到 dagre 图
-  const edges: Edge[] = [];
-  visibleMembers.forEach((member) => {
-    if (member.father_id) {
-      // 确保父节点也在可见列表中
-      const fatherExists = visibleMembers.some((m) => m.id === member.father_id);
-      if (fatherExists) {
-        dagreGraph.setEdge(String(member.father_id), String(member.id));
-
-        // 获取连线颜色：使用支系的【基准色】（最深色），作为树干颜色
-        const baseColor = memberBaseColorMap.get(member.id);
-        const edgeColor = baseColor
-          ? generateBranchColor(baseColor, 0) // 始终使用第0级（最深）颜色
-          : "hsl(var(--muted-foreground))";
-
-        edges.push({
-          id: `e${member.father_id}-${member.id}`,
-          source: String(member.father_id),
-          target: String(member.id),
-          type: "flowing",
-          animated: false,
-          style: {
-            stroke: edgeColor,
-            strokeWidth: 2,
-            opacity: 0.6 // 稍微降低透明度，让文字更突出
-          },
-        });
-      }
-    }
+  const familyUnits = buildFamilyUnits(visibleMembers, relationships);
+  familyUnits.forEach((familyUnit) => {
+    dagreGraph.setNode(familyUnit.id, {
+      width: FAMILY_NODE_WIDTH,
+      height: FAMILY_NODE_HEIGHT,
+    });
   });
 
-  // 计算布局
+  const edges: Edge[] = [];
+
+  familyUnits.forEach((familyUnit) => {
+    familyUnit.parentIds.forEach((parentId) => {
+      if (!visibleMemberIds.has(parentId)) return;
+      dagreGraph.setEdge(String(parentId), familyUnit.id, { weight: 4 });
+      edges.push({
+        id: `e-parent-${parentId}-${familyUnit.id}`,
+        source: String(parentId),
+        target: familyUnit.id,
+        type: "flowing",
+        animated: false,
+        style: {
+          stroke: "hsl(var(--muted-foreground))",
+          strokeWidth: 1.5,
+          opacity: 0.35,
+        },
+      });
+    });
+
+    familyUnit.childIds.forEach((childId) => {
+      if (!visibleMemberIds.has(childId)) return;
+      dagreGraph.setEdge(familyUnit.id, String(childId), { weight: 6 });
+      const edgeStyle = getChildEdgeStyle(familyUnit.relationKinds);
+      edges.push({
+        id: `e-family-${familyUnit.id}-${childId}`,
+        source: familyUnit.id,
+        target: String(childId),
+        type: "flowing",
+        animated: false,
+        style: edgeStyle,
+        data: {
+          relationKind: familyUnit.relationKinds.join(","),
+        },
+      });
+    });
+  });
+
   dagre.layout(dagreGraph);
 
-  // 4. 转换为 React Flow 节点
+  const parentFamilyCounts = countParentFamilyUnits(familyUnits);
+  familyUnits.forEach((familyUnit) => {
+    if (familyUnit.parentIds.length !== 2) return;
+    const [firstParentId, secondParentId] = familyUnit.parentIds;
+    if ((parentFamilyCounts.get(firstParentId) || 0) > 1 || (parentFamilyCounts.get(secondParentId) || 0) > 1) {
+      return;
+    }
+
+    const familyPosition = dagreGraph.node(familyUnit.id);
+    const firstParent = dagreGraph.node(String(firstParentId));
+    const secondParent = dagreGraph.node(String(secondParentId));
+    if (!familyPosition || !firstParent || !secondParent) return;
+
+    const parentY = Math.min(firstParent.y, secondParent.y);
+    firstParent.x = familyPosition.x - NODE_WIDTH / 2 - 16;
+    secondParent.x = familyPosition.x + NODE_WIDTH / 2 + 16;
+    firstParent.y = parentY;
+    secondParent.y = parentY;
+  });
+
   let minX = Infinity;
   const generationYMap = new Map<number, { totalY: number; count: number }>();
 
   const memberNodes: Node[] = visibleMembers.map((member) => {
     const nodeWithPosition = dagreGraph.node(String(member.id));
     const hasChildren = (childrenMap.get(member.id)?.length || 0) > 0;
-
-    // 计算左上角位置
     const x = nodeWithPosition.x - NODE_WIDTH / 2;
     const y = nodeWithPosition.y - NODE_HEIGHT / 2;
 
-    // 更新全局 minX
-    if (x < minX) minX = x;
+    minX = Math.min(minX, x);
 
-    // 收集世代 Y 坐标信息
     if (member.generation) {
       const current = generationYMap.get(member.generation) || { totalY: 0, count: 0 };
       generationYMap.set(member.generation, {
         totalY: current.totalY + nodeWithPosition.y,
-        count: current.count + 1
+        count: current.count + 1,
       });
     }
 
-    // 计算特定节点的渐变颜色
     const baseColor = memberBaseColorMap.get(member.id);
-    // 代数偏移量：当前代数 - (根节点代数 + 1)。这样根节点的儿子(房头)偏移为0，也就是最深色。
-    // 如果 member.generation 为 null，默认给 0
     const genOffset = (member.generation || rootGeneration) - (rootGeneration + 1);
-    const nodeColor = baseColor
-      ? generateBranchColor(baseColor, Math.max(0, genOffset))
-      : undefined;
+    const nodeColor = baseColor ? generateBranchColor(baseColor, Math.max(0, genOffset)) : undefined;
 
     const nodeData: FamilyNodeData = {
       ...member,
@@ -237,7 +274,7 @@ function getLayoutedElements(
       hasChildren,
       collapsed: collapsedIds.has(member.id),
       onToggleCollapse,
-      branchColor: nodeColor, // 传递计算后的具体颜色
+      branchColor: nodeColor,
     };
 
     return {
@@ -248,37 +285,66 @@ function getLayoutedElements(
     };
   });
 
-  // 5. 生成世代标尺节点
-  const generationNodes: Node[] = [];
-  // 标尺 X 坐标：在最左侧节点的基础上再向左偏移
-  const labelX = minX - 140;
-
-  generationYMap.forEach(({ totalY, count }, generation) => {
-    const avgY = totalY / count;
-    // 调整 Y 坐标使其垂直居中
-    const labelY = avgY - 40;
-
-    generationNodes.push({
-      id: `gen-label-${generation}`,
-      type: "generationLabel",
-      position: { x: labelX, y: labelY },
+  const familyNodes: Node[] = familyUnits.map((familyUnit) => {
+    const position = dagreGraph.node(familyUnit.id);
+    return {
+      id: familyUnit.id,
+      type: "familyUnit",
+      position: {
+        x: position.x - FAMILY_NODE_WIDTH / 2,
+        y: position.y - FAMILY_NODE_HEIGHT / 2,
+      },
       data: {
-        generation,
-        label: `第${toChineseNum(generation)}世`
+        relationKinds: familyUnit.relationKinds,
       },
       draggable: false,
       selectable: false,
-      zIndex: -1, // 放在底层
+    };
+  });
+
+  const generationNodes: Node[] = [];
+  const labelX = Number.isFinite(minX) ? minX - 140 : -140;
+  generationYMap.forEach(({ totalY, count }, generation) => {
+    generationNodes.push({
+      id: `gen-label-${generation}`,
+      type: "generationLabel",
+      position: { x: labelX, y: totalY / count - 40 },
+      data: {
+        generation,
+        label: `第${toChineseNum(generation)}世`,
+      },
+      draggable: false,
+      selectable: false,
+      zIndex: -1,
     });
   });
 
-  return { nodes: [...memberNodes, ...generationNodes], edges };
+  return { nodes: [...memberNodes, ...familyNodes, ...generationNodes], edges };
 }
 
-const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, onMemberClick }: FamilyTreeGraphInnerProps) {
+const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
+  dataset,
+  onMemberClick,
+}: FamilyTreeGraphInnerProps) {
   const reactFlowInstance = useReactFlow();
   const containerRef = useRef<HTMLDivElement>(null);
-  const [userEmail, setUserEmail] = useState<string>("");
+  const [userEmail, setUserEmail] = useState("");
+  const [surnameInput, setSurnameInput] = useState("");
+  const [nameInput, setNameInput] = useState("");
+  const [upGenerationsInput, setUpGenerationsInput] = useState("2");
+  const [downGenerationsInput, setDownGenerationsInput] = useState("3");
+  const [appliedFilter, setAppliedFilter] = useState<AppliedFilter | null>(null);
+  const [selectedCenterId, setSelectedCenterId] = useState<number | null>(null);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerPage, setPickerPage] = useState(1);
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
+  const [highlightedPathIds, setHighlightedPathIds] = useState<Set<string>>(new Set());
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [isDraggable, setIsDraggable] = useState(false);
+  const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
+
+  const members = dataset.members;
+  const relationships = dataset.relationships;
 
   useEffect(() => {
     const fetchUser = async () => {
@@ -291,76 +357,105 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
     fetchUser();
   }, []);
 
-  const [searchQuery, setSearchQuery] = useState("");
-  const [highlightedId, setHighlightedId] = useState<number | null>(null);
-  // 新增：存储高亮路径上的所有元素 ID（节点 ID 和 连线 ID）
-  const [highlightedPathIds, setHighlightedPathIds] = useState<Set<string>>(new Set());
+  const candidateMembers = useMemo(
+    () => getFilterCandidates(appliedFilter, members, relationships),
+    [appliedFilter, members, relationships]
+  );
 
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isDraggable, setIsDraggable] = useState(false);
-
-  // 折叠状态管理
-  const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
-
-  // 构建 childrenMap
-  const childrenMap = useMemo(() => {
-    const map = new Map<number, number[]>();
-    initialData.forEach(m => {
-      if (m.father_id) {
-        const children = map.get(m.father_id) || [];
-        children.push(m.id);
-        map.set(m.father_id, children);
-      }
-    });
-    return map;
-  }, [initialData]);
-
-  // 计算高亮路径（溯源 + 繁衍）
   useEffect(() => {
-    if (!highlightedId) {
+    if (!appliedFilter || candidateMembers.length === 0) {
+      setSelectedCenterId(null);
+      setHighlightedId(null);
+      return;
+    }
+
+    setSelectedCenterId((currentId) => {
+      if (currentId && candidateMembers.some((member) => member.id === currentId)) {
+        return currentId;
+      }
+      return candidateMembers[0].id;
+    });
+  }, [appliedFilter, candidateMembers]);
+
+  useEffect(() => {
+    setHighlightedId(selectedCenterId);
+  }, [selectedCenterId]);
+
+  const filteredMembers = useMemo(() => {
+    if (!appliedFilter || !selectedCenterId) return [];
+    return getVisibleMembers(appliedFilter, selectedCenterId, members, relationships);
+  }, [appliedFilter, selectedCenterId, members, relationships]);
+
+  const filteredMemberIds = useMemo(
+    () => new Set(filteredMembers.map((member) => member.id)),
+    [filteredMembers]
+  );
+
+  const filteredRelationships = useMemo(
+    () =>
+      relationships.filter(
+        (relationship) =>
+          filteredMemberIds.has(relationship.child_id) && filteredMemberIds.has(relationship.parent_id)
+      ),
+    [relationships, filteredMemberIds]
+  );
+
+  const childrenMap = useMemo(
+    () => buildChildrenMap(filteredMembers, filteredRelationships),
+    [filteredMembers, filteredRelationships]
+  );
+
+  useEffect(() => {
+    if (!highlightedId || filteredMembers.length === 0) {
       setHighlightedPathIds(new Set());
       return;
     }
 
     const pathSet = new Set<string>();
-    const memberMap = new Map(initialData.map(m => [m.id, m]));
+    const memberMap = new Map(filteredMembers.map((member) => [member.id, member]));
+    const ancestorQueue = [highlightedId];
+    const visitedAncestors = new Set<number>();
 
-    // 1. 向上溯源 (Ancestors)
-    let currentId = highlightedId;
-    pathSet.add(String(currentId)); // 添加当前节点
+    pathSet.add(String(highlightedId));
 
-    while (true) {
+    while (ancestorQueue.length > 0) {
+      const currentId = ancestorQueue.shift()!;
+      if (visitedAncestors.has(currentId)) continue;
+      visitedAncestors.add(currentId);
+
       const member = memberMap.get(currentId);
-      if (!member || !member.father_id) break;
+      if (!member) continue;
 
-      // 添加父节点 ID
-      pathSet.add(String(member.father_id));
-      // 添加连接线 ID (注意 edge id 格式是 e{father}-{child})
-      pathSet.add(`e${member.father_id}-${currentId}`);
-
-      currentId = member.father_id;
+      getParentRelations(member, filteredRelationships).forEach((relation) => {
+        if (!memberMap.has(relation.parentId)) return;
+        pathSet.add(String(relation.parentId));
+        pathSet.add(getRelationEdgeId(relation));
+        ancestorQueue.push(relation.parentId);
+      });
     }
 
-    // 2. 向下繁衍 (Descendants)
-    const queue = [highlightedId];
-    while (queue.length > 0) {
-      const parentId = queue.shift()!;
-      const children = childrenMap.get(parentId) || [];
+    const descendantQueue = [highlightedId];
+    const visitedDescendants = new Set<number>();
+    while (descendantQueue.length > 0) {
+      const parentId = descendantQueue.shift()!;
+      if (visitedDescendants.has(parentId)) continue;
+      visitedDescendants.add(parentId);
 
-      children.forEach(childId => {
-        // 添加子节点 ID
+      (childrenMap.get(parentId) || []).forEach((childId) => {
         pathSet.add(String(childId));
-        // 添加连接线 ID
-        pathSet.add(`e${parentId}-${childId}`);
-        // 继续向下遍历
-        queue.push(childId);
+        const child = memberMap.get(childId);
+        if (child) {
+          getParentRelations(child, filteredRelationships)
+            .filter((relation) => relation.parentId === parentId)
+            .forEach((relation) => pathSet.add(getRelationEdgeId(relation)));
+        }
+        descendantQueue.push(childId);
       });
     }
 
     setHighlightedPathIds(pathSet);
-  }, [highlightedId, initialData, childrenMap]);
+  }, [highlightedId, filteredMembers, filteredRelationships, childrenMap]);
 
-  // 处理折叠切换
   const onToggleCollapse = useCallback((id: number) => {
     setCollapsedIds((prev) => {
       const next = new Set(prev);
@@ -373,48 +468,42 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
     });
   }, []);
 
-  // 展开所有
-  const onExpandAll = useCallback(() => {
-    setCollapsedIds(new Set());
-    setTimeout(() => {
-      reactFlowInstance.fitView({ padding: 0.2, duration: 300 });
-    }, 100);
-  }, [reactFlowInstance]);
-
-  // 转换数据为节点和边（使用 dagre 自动布局）
   const { nodes: initialNodes, edges: initialEdges } = useMemo(
-    () => getLayoutedElements(initialData, childrenMap, collapsedIds, highlightedId, onToggleCollapse),
-    [initialData, childrenMap, collapsedIds, highlightedId, onToggleCollapse]
+    () =>
+      getLayoutedElements(
+        filteredMembers,
+        filteredRelationships,
+        collapsedIds,
+        highlightedId,
+        onToggleCollapse
+      ),
+    [filteredMembers, filteredRelationships, collapsedIds, highlightedId, onToggleCollapse]
   );
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-  // 当 initialNodes 变化（例如折叠状态改变），同步更新 nodes
   useEffect(() => {
     setNodes(initialNodes);
   }, [initialNodes, setNodes]);
 
-  // 当 initialEdges 变化，同步更新 edges
   useEffect(() => {
     setEdges(initialEdges);
   }, [initialEdges, setEdges]);
 
-  // 监听高亮路径变化，更新节点和连线的视觉状态
   useEffect(() => {
     const hasHighlight = highlightedId !== null;
 
-    setNodes((nds) =>
-      nds.map((node) => {
-        // 特殊处理世代标尺节点
-        if (node.type === 'generationLabel') {
+    setNodes((currentNodes) =>
+      currentNodes.map((node) => {
+        if (node.type === "generationLabel" || node.type === "familyUnit") {
           return {
             ...node,
             style: {
               ...node.style,
-              opacity: hasHighlight ? 0.2 : 1, // 高亮时淡化标尺
-              transition: 'opacity 0.3s ease',
-            }
+              opacity: hasHighlight ? 0.35 : 1,
+              transition: "opacity 0.3s ease",
+            },
           };
         }
 
@@ -423,132 +512,129 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
           ...node,
           data: {
             ...node.data,
-            isHighlighted: node.id === String(highlightedId), // 仅当前选中节点完全高亮
-            isPathHighlighted: isPathNode, // 路径上的节点次级高亮
-            isDimmed: hasHighlight && !isPathNode, // 非路径节点变暗
+            isHighlighted: node.id === String(highlightedId),
+            isPathHighlighted: isPathNode,
+            isDimmed: hasHighlight && !isPathNode,
           },
         };
       })
     );
 
-    setEdges((eds) =>
-      eds.map((edge) => {
+    setEdges((currentEdges) =>
+      currentEdges.map((edge) => {
         const isPathEdge = highlightedPathIds.has(edge.id);
+        const relationKind = String(edge.data?.relationKind || "");
+        const baseStyle = getChildEdgeStyle(
+          relationKind ? (relationKind.split(",") as RelationKind[]) : ["biological"]
+        );
 
-        // 动态计算连线样式
-        let strokeColor = edge.style?.stroke || "hsl(var(--muted-foreground))";
-        let strokeWidth = 2;
-        let opacity = 0.6;
-        let zIndex = 0;
-
-        if (hasHighlight) {
-          if (isPathEdge) {
-            strokeColor = "#f59e0b"; // amber-500: 金黄色高亮路径
-            strokeWidth = 3; // 加粗
-            opacity = 1;
-            zIndex = 10; // 浮在最上层
-          } else {
-            opacity = 0.1; // 极度淡化非相关连线
-          }
+        if (!hasHighlight) {
+          return {
+            ...edge,
+            animated: false,
+            style: {
+              ...edge.style,
+              ...(edge.id.startsWith("e-family-") ? baseStyle : {}),
+            },
+            zIndex: 0,
+          };
         }
 
         return {
           ...edge,
-          animated: isPathEdge, // 高亮路径带动画
+          animated: isPathEdge,
           style: {
             ...edge.style,
-            stroke: strokeColor,
-            strokeWidth: strokeWidth,
-            opacity: opacity,
+            stroke: isPathEdge ? "#f59e0b" : edge.style?.stroke,
+            strokeWidth: isPathEdge ? 3 : edge.style?.strokeWidth,
+            opacity: isPathEdge ? 1 : 0.1,
           },
-          zIndex: zIndex,
+          zIndex: isPathEdge ? 10 : 0,
         };
       })
     );
   }, [highlightedId, highlightedPathIds, setNodes, setEdges]);
 
-  // 重置视图
-  const onResetView = useCallback(() => {
-    // 重置节点位置 (重新计算布局，保持折叠状态)
-    const { nodes: resetNodes } = getLayoutedElements(initialData, childrenMap, collapsedIds, highlightedId, onToggleCollapse);
-    setNodes(resetNodes);
-    // 重置视图位置，加一点延迟确保节点渲染完成
-    setTimeout(() => {
+  useEffect(() => {
+    const timer = setTimeout(() => {
       reactFlowInstance.fitView({ padding: 0.2, duration: 300 });
-    }, 10);
-  }, [reactFlowInstance, initialData, childrenMap, collapsedIds, highlightedId, setNodes, onToggleCollapse]);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [reactFlowInstance, filteredMembers.length]);
 
-  // 搜索功能
-  const onSearch = useCallback(() => {
-    if (!searchQuery.trim()) {
-      setHighlightedId(null);
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setIsFullscreen(!!document.fullscreenElement);
+    };
+
+    document.addEventListener("fullscreenchange", handleFullscreenChange);
+    return () => {
+      document.removeEventListener("fullscreenchange", handleFullscreenChange);
+    };
+  }, []);
+
+  const onApplyFilter = useCallback(() => {
+    const trimmedName = nameInput.trim();
+    const trimmedSurname = surnameInput.trim();
+    const upGenerations = parseGenerationInput(upGenerationsInput, 0);
+    const downGenerations = parseGenerationInput(downGenerationsInput, 3);
+
+    setCollapsedIds(new Set());
+    setPickerPage(1);
+
+    if (trimmedName) {
+      setAppliedFilter({
+        mode: "name",
+        name: trimmedName,
+        upGenerations,
+        downGenerations,
+      });
+      setPickerOpen(true);
       return;
     }
 
-    const found = initialData.find((member) =>
-      member.name.toLowerCase().includes(searchQuery.toLowerCase())
-    );
-
-    if (found) {
-      let current = found;
-      const idsToExpand = new Set<number>();
-      while (current.father_id) {
-        if (collapsedIds.has(current.father_id)) {
-          idsToExpand.add(current.father_id);
-        }
-        const father = initialData.find(m => m.id === current.father_id);
-        if (!father) break;
-        current = father;
-      }
-
-      if (idsToExpand.size > 0) {
-        setCollapsedIds(prev => {
-          const next = new Set(prev);
-          idsToExpand.forEach(id => next.delete(id));
-          return next;
-        });
-        setTimeout(() => {
-          setHighlightedId(found.id);
-        }, 100);
-      } else {
-        setHighlightedId(found.id);
-      }
-    } else {
-      setHighlightedId(null);
+    if (trimmedSurname) {
+      setAppliedFilter({
+        mode: "surname",
+        surname: trimmedSurname,
+        downGenerations,
+      });
+      setUpGenerationsInput("0");
+      setPickerOpen(true);
+      return;
     }
-  }, [searchQuery, initialData, collapsedIds]);
 
-  // 监听 highlight 变化后聚焦
-  useEffect(() => {
-    if (highlightedId) {
-      const node = reactFlowInstance.getNode(String(highlightedId));
-      if (node) {
-        reactFlowInstance.setCenter(node.position.x + NODE_WIDTH / 2, node.position.y + NODE_HEIGHT / 2, {
-          zoom: 1.5,
-          duration: 500,
-        });
-      }
-    }
-  }, [highlightedId, reactFlowInstance]);
-
-  // 清除搜索
-  const onClearSearch = useCallback(() => {
-    setSearchQuery("");
+    setAppliedFilter(null);
+    setSelectedCenterId(null);
     setHighlightedId(null);
+  }, [nameInput, surnameInput, upGenerationsInput, downGenerationsInput]);
+
+  const onResetFilters = useCallback(() => {
+    setSurnameInput("");
+    setNameInput("");
+    setUpGenerationsInput("2");
+    setDownGenerationsInput("3");
+    setAppliedFilter(null);
+    setSelectedCenterId(null);
+    setHighlightedId(null);
+    setCollapsedIds(new Set());
+    setPickerOpen(false);
   }, []);
 
-  // 节点点击事件
-  const onNodeClick = useCallback(
-    (_: MouseEvent, node: Node) => {
-      const member = initialData.find((m) => m.id === Number(node.id));
-      if (member && onMemberClick) {
-        onMemberClick(member);
-      }
-    },
-    [initialData, onMemberClick]
-  );
+  const onExpandAll = useCallback(() => {
+    setCollapsedIds(new Set());
+    setTimeout(() => {
+      reactFlowInstance.fitView({ padding: 0.2, duration: 300 });
+    }, 100);
+  }, [reactFlowInstance]);
 
-  // 全屏切换
+  const onResetView = useCallback(() => {
+    setNodes(initialNodes);
+    setTimeout(() => {
+      reactFlowInstance.fitView({ padding: 0.2, duration: 300 });
+    }, 10);
+  }, [reactFlowInstance, initialNodes, setNodes]);
+
   const toggleFullscreen = useCallback(async () => {
     if (!containerRef.current) return;
 
@@ -565,46 +651,15 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
     }
   }, []);
 
-  // 监听全屏变化
-  useEffect(() => {
-    const handleFullscreenChange = () => {
-      setIsFullscreen(!!document.fullscreenElement);
-    };
-
-    document.addEventListener("fullscreenchange", handleFullscreenChange);
-    return () => {
-      document.removeEventListener("fullscreenchange", handleFullscreenChange);
-    };
-  }, []);
-
-
-
   const onDownload = useCallback(async () => {
-    // 获取视口元素
-    const viewportElem = document.querySelector(
-      ".react-flow__viewport"
-    ) as HTMLElement;
+    const viewportElem = document.querySelector(".react-flow__viewport") as HTMLElement;
+    if (!viewportElem || nodes.length === 0) return;
 
-    if (!viewportElem) return;
-
-    // 计算所有节点的边界
     const bounds = getNodesBounds(nodes);
-
-    // 设置导出图片的尺寸（包含更多内边距，让画面更舒展）
     const imageWidth = bounds.width + 300;
     const imageHeight = bounds.height + 300;
+    const transform = getViewportForBounds(bounds, imageWidth, imageHeight, 0.1, 2, 0.15);
 
-    // 计算变换参数以适应所有节点
-    const transform = getViewportForBounds(
-      bounds,
-      imageWidth,
-      imageHeight,
-      0.1, // min zoom
-      2, // max zoom
-      0.15 // padding (增加留白)
-    );
-
-    // 1. 预加载背景图片 (Base64)
     let bgDataUrl = "";
     try {
       const response = await fetch("/images/login-bg.jpg");
@@ -620,16 +675,14 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
       console.warn("Failed to load background image:", error);
     }
 
-    // 2. 准备 Canvas
-    const canvas = document.createElement('canvas');
-    canvas.width = imageWidth * 2.0; // Match pixelRatio
-    canvas.height = imageHeight * 2.0;
-    const ctx = canvas.getContext('2d');
+    const canvas = document.createElement("canvas");
+    canvas.width = imageWidth * 2;
+    canvas.height = imageHeight * 2;
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
-    ctx.scale(2.0, 2.0);
+    ctx.scale(2, 2);
 
-    // 3. 绘制背景
     if (bgDataUrl) {
       const bgImg = new Image();
       bgImg.src = bgDataUrl;
@@ -637,7 +690,6 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
         bgImg.onload = resolve;
       });
 
-      // Cover 模式
       const bgRatio = bgImg.width / bgImg.height;
       const canvasRatio = imageWidth / imageHeight;
       let drawW = imageWidth;
@@ -661,24 +713,20 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
       ctx.fillRect(0, 0, imageWidth, imageHeight);
     }
 
-    // 4. 绘制水印 (平铺)
-    const watermarkText = userEmail || 'Liu Family';
+    const watermarkText = userEmail || "Liu Family";
     ctx.save();
-    ctx.rotate(-30 * Math.PI / 180);
+    ctx.rotate((-30 * Math.PI) / 180);
     ctx.font = "16px sans-serif";
     ctx.fillStyle = "rgba(0, 0, 0, 0.03)";
     ctx.textAlign = "center";
 
-    const stepX = 200;
-    const stepY = 100;
-    for (let x = -imageWidth; x < imageWidth * 2; x += stepX) {
-      for (let y = -imageHeight; y < imageHeight * 2; y += stepY) {
+    for (let x = -imageWidth; x < imageWidth * 2; x += 200) {
+      for (let y = -imageHeight; y < imageHeight * 2; y += 100) {
         ctx.fillText(watermarkText, x, y);
       }
     }
     ctx.restore();
 
-    // 5. 生成族谱树的透明 PNG 并绘制
     const treeDataUrl = await toPng(viewportElem, {
       width: imageWidth,
       height: imageHeight,
@@ -687,10 +735,10 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
         width: imageWidth.toString(),
         height: imageHeight.toString(),
         transform: `translate(${transform.x}px, ${transform.y}px) scale(${transform.zoom})`,
-        fontFamily: 'system-ui, -apple-system, sans-serif',
-        backgroundColor: 'transparent', // Explicitly set style bg to transparent
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        backgroundColor: "transparent",
       },
-      pixelRatio: 2.0, // 降低到 2.0 兼顾清晰度与体积
+      pixelRatio: 2,
       cacheBust: true,
     });
 
@@ -702,10 +750,9 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
 
     ctx.drawImage(treeImg, 0, 0, imageWidth, imageHeight);
 
-    // 6. 导出为 JPEG 以大幅压缩体积
-    const finalDataUrl = canvas.toDataURL("image/jpeg", 0.85); // 使用 0.85 质量均衡体积与清晰度
+    const finalDataUrl = canvas.toDataURL("image/jpeg", 0.85);
     const a = document.createElement("a");
-    a.setAttribute("download", `family-tree-${new Date().toISOString().split('T')[0]}.jpg`);
+    a.setAttribute("download", `family-tree-${new Date().toISOString().split("T")[0]}.jpg`);
     a.setAttribute("href", finalDataUrl);
     a.click();
   }, [nodes, userEmail]);
@@ -714,19 +761,30 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
     setIsDraggable((prev) => !prev);
   }, []);
 
-  // 修复：路由切换回来时，强制重新适应视图
-  // onInit 中的 fitView 可能因为容器尺寸未就绪而失效
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      reactFlowInstance.fitView({ padding: 0.2, duration: 300 });
-    }, 100);
-    return () => clearTimeout(timer);
-  }, [reactFlowInstance]);
+  const onNodeClick = useCallback(
+    (_: MouseEvent, node: Node) => {
+      if (node.type !== "familyMember") return;
+      const member = members.find((item) => item.id === Number(node.id));
+      if (member && onMemberClick) {
+        setHighlightedId(member.id);
+        onMemberClick(member);
+      }
+    },
+    [members, onMemberClick]
+  );
+
+  const pickerTotalPages = Math.max(1, Math.ceil(candidateMembers.length / PICKER_PAGE_SIZE));
+  const pickerItems = candidateMembers.slice(
+    (pickerPage - 1) * PICKER_PAGE_SIZE,
+    pickerPage * PICKER_PAGE_SIZE
+  );
+  const isSurnameMode = appliedFilter?.mode === "surname" || (!!surnameInput.trim() && !nameInput.trim());
+  const selectedCenter = members.find((member) => member.id === selectedCenterId) || null;
 
   return (
     <div
       ref={containerRef}
-      className="w-full h-[calc(100vh-200px)] min-h-[500px] border rounded-lg bg-background relative"
+      className="relative h-[calc(100vh-200px)] min-h-[560px] w-full rounded-lg border bg-background"
     >
       <ReactFlow
         nodes={nodes}
@@ -736,17 +794,14 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
         onNodeClick={onNodeClick}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
-        onInit={(instance) => {
-          // 只在初始化时执行一次 fitView
-          instance.fitView({ padding: 0.2 });
-        }}
+        onInit={(instance) => instance.fitView({ padding: 0.2 })}
         minZoom={0.1}
         maxZoom={2}
         attributionPosition="bottom-left"
         proOptions={{ hideAttribution: true }}
         nodesDraggable={isDraggable}
-        nodesConnectable={false} // 禁止从节点拖出连线
-        edgesFocusable={false}   // 禁止选中连线
+        nodesConnectable={false}
+        edgesFocusable={false}
       >
         <Controls
           showInteractive={false}
@@ -754,94 +809,99 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
         />
         <Background variant={BackgroundVariant.Dots} gap={20} size={1} />
 
-        {/* 顶部统一工具栏：左侧搜索，右侧按钮 */}
         <Panel
           position="top-left"
-          className="!absolute !top-0 !left-0 !w-full !m-0 p-2 sm:p-4 flex justify-between items-start pointer-events-none z-10"
+          className="!absolute !left-0 !top-0 !m-0 flex !w-full flex-wrap items-start justify-between gap-2 p-2 sm:p-4 pointer-events-none z-10"
         >
-          {/* 左侧：搜索框 */}
-          <div className="pointer-events-auto flex items-center gap-1 bg-background/95 backdrop-blur-sm border rounded-md p-1 shadow-sm">
+          <div className="pointer-events-auto flex flex-wrap items-center gap-2 rounded-md border bg-background/95 p-2 shadow-sm backdrop-blur-sm">
             <Input
-              placeholder="搜索..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && onSearch()}
-              className="h-8 w-28 sm:w-40 md:w-56 border-0 focus-visible:ring-0 placeholder:text-muted-foreground/70"
+              placeholder="姓氏"
+              value={surnameInput}
+              onChange={(event) => setSurnameInput(event.target.value)}
+              className="h-9 w-24"
             />
-            <Button size="icon" variant="ghost" className="h-8 w-8" onClick={onSearch} title="搜索成员">
-              <Search className="h-4 w-4" />
+            <Input
+              placeholder="姓名"
+              value={nameInput}
+              onChange={(event) => setNameInput(event.target.value)}
+              onKeyDown={(event) => event.key === "Enter" && onApplyFilter()}
+              className="h-9 w-32 sm:w-40"
+            />
+            <Input
+              type="number"
+              min={0}
+              disabled={isSurnameMode}
+              title={isSurnameMode ? "姓氏支系模式只能向下展示" : "向上几代"}
+              value={isSurnameMode ? "0" : upGenerationsInput}
+              onChange={(event) => setUpGenerationsInput(event.target.value)}
+              className="h-9 w-24"
+              placeholder="向上"
+            />
+            <Input
+              type="number"
+              min={0}
+              value={downGenerationsInput}
+              onChange={(event) => setDownGenerationsInput(event.target.value)}
+              className="h-9 w-24"
+              placeholder="向下"
+            />
+            <Button size="sm" onClick={onApplyFilter} className="h-9">
+              <Search className="mr-1 h-4 w-4" />
+              应用
             </Button>
-            {searchQuery && (
-              <Button size="icon" variant="ghost" className="h-8 w-8" onClick={onClearSearch} title="清除搜索内容">
-                <X className="h-4 w-4" />
-              </Button>
-            )}
+            <Button size="icon" variant="ghost" onClick={onResetFilters} title="重置筛选" className="h-9 w-9">
+              <X className="h-4 w-4" />
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={!appliedFilter || candidateMembers.length === 0}
+              onClick={() => setPickerOpen(true)}
+              className="h-9"
+            >
+              {selectedCenter ? selectedCenter.name : "选择支系"}
+            </Button>
           </div>
 
-          {/* 右侧：操作按钮组 */}
           <div className="pointer-events-auto flex items-center gap-2">
             <Button
               size="sm"
               variant="outline"
               onClick={onResetView}
-              title="将视图重置到中心位置并恢复缩放"
-              className="bg-background/95 backdrop-blur-sm shadow-sm h-9 w-9 px-0 sm:w-auto sm:px-4"
+              disabled={nodes.length === 0}
+              title="重置视图"
+              className="h-9 w-9 bg-background/95 px-0 shadow-sm backdrop-blur-sm sm:w-auto sm:px-4"
             >
               <RotateCcw className="h-4 w-4 sm:mr-1" />
               <span className="hidden sm:inline">重置</span>
             </Button>
-
             <Button
               size="sm"
               variant="outline"
               onClick={toggleFullscreen}
-              title={isFullscreen ? "退出全屏模式" : "进入全屏模式"}
-              className="bg-background/95 backdrop-blur-sm shadow-sm h-9 w-9 px-0 sm:w-auto sm:px-4"
+              title={isFullscreen ? "退出全屏" : "进入全屏"}
+              className="h-9 w-9 bg-background/95 px-0 shadow-sm backdrop-blur-sm sm:w-auto sm:px-4"
             >
-              {isFullscreen ? (
-                <>
-                  <Minimize className="h-4 w-4 sm:mr-1" />
-                  <span className="hidden sm:inline">退出全屏</span>
-                </>
-              ) : (
-                <>
-                  <Maximize className="h-4 w-4 sm:mr-1" />
-                  <span className="hidden sm:inline">全屏</span>
-                </>
-              )}
+              {isFullscreen ? <Minimize className="h-4 w-4 sm:mr-1" /> : <Maximize className="h-4 w-4 sm:mr-1" />}
+              <span className="hidden sm:inline">{isFullscreen ? "退出全屏" : "全屏"}</span>
             </Button>
-
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  className="bg-background/95 backdrop-blur-sm shadow-sm h-9 w-9 px-0"
-                  title="更多操作"
-                >
+                <Button size="icon" variant="outline" className="h-9 w-9 bg-background/95 shadow-sm backdrop-blur-sm">
                   <MoreVertical className="h-4 w-4" />
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="end">
                 <DropdownMenuItem onClick={onExpandAll}>
-                  <ChevronsDown className="h-4 w-4 mr-2" />
+                  <ChevronsDown className="mr-2 h-4 w-4" />
                   全部展开
                 </DropdownMenuItem>
                 <DropdownMenuItem onClick={toggleDraggable}>
-                  {isDraggable ? (
-                    <>
-                      <Unlock className="h-4 w-4 mr-2" />
-                      解锁位置
-                    </>
-                  ) : (
-                    <>
-                      <Lock className="h-4 w-4 mr-2" />
-                      锁定位置
-                    </>
-                  )}
+                  {isDraggable ? <Unlock className="mr-2 h-4 w-4" /> : <Lock className="mr-2 h-4 w-4" />}
+                  {isDraggable ? "解锁位置" : "锁定位置"}
                 </DropdownMenuItem>
-                <DropdownMenuItem onClick={onDownload}>
-                  <Download className="h-4 w-4 mr-2" />
+                <DropdownMenuItem onClick={onDownload} disabled={nodes.length === 0}>
+                  <Download className="mr-2 h-4 w-4" />
                   保存图片
                 </DropdownMenuItem>
               </DropdownMenuContent>
@@ -849,13 +909,46 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({ initialData, o
           </div>
         </Panel>
 
-        {/* 统计信息 */}
-        <Panel position="bottom-right" className="bg-background/95 backdrop-blur-sm border rounded-md px-3 py-2">
+        <Panel position="bottom-right" className="rounded-md border bg-background/95 px-3 py-2 backdrop-blur-sm">
           <span className="text-sm text-muted-foreground">
-            共 {initialData.length} 位成员
+            显示 {filteredMembers.length} / {members.length} 位成员
           </span>
         </Panel>
       </ReactFlow>
+
+      {nodes.length === 0 && (
+        <div className="pointer-events-none absolute inset-x-0 top-36 z-[1] flex justify-center px-4">
+          <div className="max-w-xl rounded-lg border bg-background/95 px-6 py-5 text-center shadow-sm backdrop-blur-sm">
+            <div className="text-base font-medium">按需展示族谱树</div>
+            <div className="mt-2 text-sm text-muted-foreground">
+              输入姓名可展示其向上和向下关系；只输入姓氏时会选择该姓氏的根支系并向下展开。
+            </div>
+          </div>
+        </div>
+      )}
+
+      <CandidatePickerDialog
+        open={pickerOpen}
+        onOpenChange={setPickerOpen}
+        title={appliedFilter?.mode === "surname" ? "选择支系" : "选择成员"}
+        description={
+          appliedFilter?.mode === "surname"
+            ? "只输入姓氏时，请选择要展示的根支系。"
+            : "姓名匹配到多位成员，请选择一个作为中心。"
+        }
+        members={pickerItems}
+        totalCount={candidateMembers.length}
+        currentPage={pickerPage}
+        totalPages={pickerTotalPages}
+        selectedId={selectedCenterId}
+        onPrevious={() => setPickerPage((page) => Math.max(1, page - 1))}
+        onNext={() => setPickerPage((page) => Math.min(pickerTotalPages, page + 1))}
+        onSelect={(memberId) => {
+          setSelectedCenterId(memberId);
+          setHighlightedId(memberId);
+          setPickerOpen(false);
+        }}
+      />
     </div>
   );
 });
@@ -864,17 +957,25 @@ export function FamilyTreeGraph({ initialData }: FamilyTreeGraphProps) {
   const [selectedMember, setSelectedMember] = useState<FamilyMemberNode | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
 
-  // 获取父亲姓名
-  const getFatherName = useCallback(
-    (fatherId: number | null) => {
-      if (!fatherId) return null;
-      const father = initialData.find((m) => m.id === fatherId);
-      return father?.name || null;
+  const getMemberName = useCallback(
+    (memberId: number | null) => {
+      if (!memberId) return null;
+      return initialData.members.find((member) => member.id === memberId)?.name || null;
     },
-    [initialData]
+    [initialData.members]
   );
 
-  // 处理成员点击
+  const getPrimaryParentId = useCallback(
+    (member: FamilyMemberNode | null, role: "father" | "mother") => {
+      if (!member) return null;
+      const relationship = initialData.relationships.find(
+        (item) => item.child_id === member.id && item.parent_role === role && item.is_primary
+      );
+      return relationship?.parent_id || (role === "father" ? member.father_id : member.mom_id);
+    },
+    [initialData.relationships]
+  );
+
   const handleMemberClick = useCallback((member: FamilyMemberNode) => {
     setSelectedMember(member);
     setIsDetailOpen(true);
@@ -883,16 +984,368 @@ export function FamilyTreeGraph({ initialData }: FamilyTreeGraphProps) {
   return (
     <>
       <ReactFlowProvider>
-        <FamilyTreeGraphInner initialData={initialData} onMemberClick={handleMemberClick} />
+        <FamilyTreeGraphInner dataset={initialData} onMemberClick={handleMemberClick} />
       </ReactFlowProvider>
 
-      {/* 成员详情弹窗 */}
       <MemberDetailDialog
         isOpen={isDetailOpen}
         onOpenChange={setIsDetailOpen}
         member={selectedMember}
-        fatherName={getFatherName(selectedMember?.father_id || null)}
+        fatherName={getMemberName(getPrimaryParentId(selectedMember, "father"))}
+        motherName={getMemberName(getPrimaryParentId(selectedMember, "mother"))}
       />
     </>
   );
+}
+
+function CandidatePickerDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  members,
+  totalCount,
+  currentPage,
+  totalPages,
+  selectedId,
+  onPrevious,
+  onNext,
+  onSelect,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description: string;
+  members: FamilyMemberNode[];
+  totalCount: number;
+  currentPage: number;
+  totalPages: number;
+  selectedId: number | null;
+  onPrevious: () => void;
+  onNext: () => void;
+  onSelect: (memberId: number) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          {members.length === 0 ? (
+            <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
+              没有找到匹配结果。
+            </div>
+          ) : (
+            members.map((member) => (
+              <button
+                key={member.id}
+                type="button"
+                onClick={() => onSelect(member.id)}
+                className={cn(
+                  "flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition-colors hover:bg-muted",
+                  selectedId === member.id && "border-primary bg-primary/5"
+                )}
+              >
+                <span className="font-medium">{member.name}</span>
+                <span className="text-muted-foreground">
+                  {member.generation ? `第${member.generation}世` : "世代未知"}
+                </span>
+              </button>
+            ))
+          )}
+        </div>
+        <div className="flex items-center justify-between pt-2">
+          <span className="text-sm text-muted-foreground">
+            共 {totalCount} 条，{currentPage} / {totalPages}
+          </span>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={onPrevious} disabled={currentPage <= 1}>
+              上一页
+            </Button>
+            <Button variant="outline" size="sm" onClick={onNext} disabled={currentPage >= totalPages}>
+              下一页
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function getFilterCandidates(
+  filter: AppliedFilter | null,
+  members: FamilyMemberNode[],
+  relationships: FamilyRelationship[]
+): FamilyMemberNode[] {
+  if (!filter) return [];
+
+  if (filter.mode === "name") {
+    return members.filter((member) => member.name.includes(filter.name));
+  }
+
+  return members.filter((member) => {
+    if (!member.name.startsWith(filter.surname)) return false;
+    return getParentRelations(member, relationships).length === 0;
+  });
+}
+
+function getVisibleMembers(
+  filter: AppliedFilter,
+  centerId: number,
+  members: FamilyMemberNode[],
+  relationships: FamilyRelationship[]
+): FamilyMemberNode[] {
+  const memberMap = new Map(members.map((member) => [member.id, member]));
+  const visibleIds = new Set<number>([centerId]);
+
+  if (filter.mode === "name") {
+    collectAncestors(centerId, filter.upGenerations, memberMap, relationships, visibleIds);
+    collectDescendants(centerId, filter.downGenerations, relationships, visibleIds);
+  } else {
+    collectDescendants(centerId, filter.downGenerations, relationships, visibleIds);
+  }
+
+  includeVisibleCoParents(visibleIds, memberMap, relationships);
+
+  return members.filter((member) => visibleIds.has(member.id));
+}
+
+function collectAncestors(
+  startId: number,
+  depth: number,
+  memberMap: Map<number, FamilyMemberNode>,
+  relationships: FamilyRelationship[],
+  visibleIds: Set<number>
+) {
+  const queue: { id: number; depth: number }[] = [{ id: startId, depth: 0 }];
+  const visited = new Set<number>();
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current.id) || current.depth >= depth) continue;
+    visited.add(current.id);
+
+    const member = memberMap.get(current.id);
+    if (!member) continue;
+
+    getParentRelations(member, relationships).forEach((relation) => {
+      if (!memberMap.has(relation.parentId)) return;
+      visibleIds.add(relation.parentId);
+      queue.push({ id: relation.parentId, depth: current.depth + 1 });
+    });
+  }
+}
+
+function collectDescendants(
+  startId: number,
+  depth: number,
+  relationships: FamilyRelationship[],
+  visibleIds: Set<number>
+) {
+  const childrenMap = new Map<number, number[]>();
+  relationships.forEach((relationship) => {
+    const children = childrenMap.get(relationship.parent_id) || [];
+    if (!children.includes(relationship.child_id)) {
+      children.push(relationship.child_id);
+    }
+    childrenMap.set(relationship.parent_id, children);
+  });
+
+  const queue: { id: number; depth: number }[] = [{ id: startId, depth: 0 }];
+  const visited = new Set<number>();
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    if (visited.has(current.id) || current.depth >= depth) continue;
+    visited.add(current.id);
+
+    (childrenMap.get(current.id) || []).forEach((childId) => {
+      visibleIds.add(childId);
+      queue.push({ id: childId, depth: current.depth + 1 });
+    });
+  }
+}
+
+function includeVisibleCoParents(
+  visibleIds: Set<number>,
+  memberMap: Map<number, FamilyMemberNode>,
+  relationships: FamilyRelationship[]
+) {
+  let changed = true;
+  while (changed) {
+    changed = false;
+    relationships.forEach((relationship) => {
+      if (!visibleIds.has(relationship.child_id)) return;
+      if (!memberMap.has(relationship.parent_id)) return;
+      if (!visibleIds.has(relationship.parent_id)) {
+        visibleIds.add(relationship.parent_id);
+        changed = true;
+      }
+    });
+  }
+}
+
+function applyCollapsedState(
+  members: FamilyMemberNode[],
+  relationships: FamilyRelationship[],
+  collapsedIds: Set<number>
+): FamilyMemberNode[] {
+  if (collapsedIds.size === 0) return members;
+
+  const memberMap = new Map(members.map((member) => [member.id, member]));
+  const memberIds = new Set(memberMap.keys());
+  const childrenMap = buildChildrenMap(members, relationships);
+  const roots = members.filter((member) =>
+    getParentRelations(member, relationships).every((relation) => !memberIds.has(relation.parentId))
+  );
+  const visibleIds = new Set<number>();
+  const queue = roots.map((member) => member.id);
+
+  while (queue.length > 0) {
+    const memberId = queue.shift()!;
+    if (visibleIds.has(memberId)) continue;
+    visibleIds.add(memberId);
+
+    if (collapsedIds.has(memberId)) continue;
+    (childrenMap.get(memberId) || []).forEach((childId) => {
+      if (memberIds.has(childId)) queue.push(childId);
+    });
+  }
+
+  return members.filter((member) => visibleIds.has(member.id));
+}
+
+function buildBranchColorMap(roots: FamilyMemberNode[], childrenMap: Map<number, number[]>): Map<number, HSLColor> {
+  const memberBaseColorMap = new Map<number, HSLColor>();
+
+  const setDescendantColors = (memberId: number, color: HSLColor) => {
+    memberBaseColorMap.set(memberId, color);
+    (childrenMap.get(memberId) || []).forEach((childId) => {
+      if (!memberBaseColorMap.has(childId)) {
+        setDescendantColors(childId, color);
+      }
+    });
+  };
+
+  roots.forEach((root) => {
+    (childrenMap.get(root.id) || []).forEach((childId, index) => {
+      setDescendantColors(childId, getBranchBaseColor(index));
+    });
+  });
+
+  return memberBaseColorMap;
+}
+
+function buildFamilyUnits(
+  visibleMembers: FamilyMemberNode[],
+  relationships: FamilyRelationship[]
+): FamilyUnit[] {
+  const visibleMemberIds = new Set(visibleMembers.map((member) => member.id));
+  const visibleChildRelationships = relationships.filter(
+    (relationship) => visibleMemberIds.has(relationship.child_id) && visibleMemberIds.has(relationship.parent_id)
+  );
+  const relationshipsByChild = new Map<number, ParentRelation[]>();
+
+  visibleChildRelationships.forEach((relationship) => {
+    const relation = toParentRelation(relationship);
+    const relations = relationshipsByChild.get(relation.childId) || [];
+    relations.push(relation);
+    relationshipsByChild.set(relation.childId, relations);
+  });
+
+  const familyMap = new Map<string, FamilyUnit>();
+
+  relationshipsByChild.forEach((relations, childId) => {
+    const orderedParents = orderParentIds(relations);
+    if (orderedParents.length === 0) return;
+
+    const key = `family-${orderedParents.join("-")}`;
+    const existing = familyMap.get(key) || {
+      id: key,
+      parentIds: orderedParents,
+      childIds: [],
+      relationKinds: [],
+    };
+
+    if (!existing.childIds.includes(childId)) {
+      existing.childIds.push(childId);
+    }
+    relations.forEach((relation) => {
+      if (!existing.relationKinds.includes(relation.relationKind)) {
+        existing.relationKinds.push(relation.relationKind);
+      }
+    });
+    familyMap.set(key, existing);
+  });
+
+  return Array.from(familyMap.values());
+}
+
+function orderParentIds(relations: ParentRelation[]): number[] {
+  const father = relations.find((relation) => relation.relationType === "father");
+  const mother = relations.find((relation) => relation.relationType === "mother");
+  const otherParents = relations
+    .filter((relation) => relation.relationType === "parent")
+    .map((relation) => relation.parentId)
+    .sort((a, b) => a - b);
+
+  return [father?.parentId, mother?.parentId, ...otherParents].filter(
+    (parentId): parentId is number => typeof parentId === "number"
+  );
+}
+
+function countParentFamilyUnits(familyUnits: FamilyUnit[]): Map<number, number> {
+  const counts = new Map<number, number>();
+  familyUnits.forEach((familyUnit) => {
+    familyUnit.parentIds.forEach((parentId) => {
+      counts.set(parentId, (counts.get(parentId) || 0) + 1);
+    });
+  });
+  return counts;
+}
+
+function getChildEdgeStyle(relationKinds: RelationKind[]): Edge["style"] {
+  if (relationKinds.includes("adoptive")) {
+    return {
+      stroke: "#8b5cf6",
+      strokeWidth: 2.5,
+      opacity: 0.85,
+      strokeDasharray: "8 5",
+    };
+  }
+
+  if (relationKinds.some((kind) => kind !== "biological")) {
+    return {
+      stroke: "#f59e0b",
+      strokeWidth: 2,
+      opacity: 0.75,
+      strokeDasharray: "5 5",
+    };
+  }
+
+  return {
+    stroke: "hsl(var(--muted-foreground))",
+    strokeWidth: 2,
+    opacity: 0.6,
+  };
+}
+
+function getRelationKindLabel(relationKinds: RelationKind[]): string {
+  const labels: Record<RelationKind, string> = {
+    biological: "亲生",
+    adoptive: "领养",
+    step: "继亲",
+    guardian: "监护",
+    unknown: "未知",
+  };
+
+  return Array.from(new Set(relationKinds)).map((kind) => labels[kind]).join(" / ") || "家庭关系";
+}
+
+function parseGenerationInput(value: string, fallback: number): number {
+  const parsed = Number.parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed < 0) return fallback;
+  return parsed;
 }

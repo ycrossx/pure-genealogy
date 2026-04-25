@@ -26,7 +26,7 @@ async function GraphLoader() {
     );
   }
 
-  if (data.length === 0) {
+  if (data.members.length === 0) {
     return (
       <div className="bg-muted/50 text-muted-foreground p-8 rounded-lg text-center">
         <p>暂无族谱数据，请先添加成员。</p>

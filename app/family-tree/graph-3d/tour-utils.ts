@@ -1,4 +1,5 @@
-import { FamilyMemberNode } from "../graph/actions";
+import type { FamilyMemberNode, FamilyRelationship } from "../graph/actions";
+import { getParentIds } from "../graph/relation-utils";
 
 /**
  * Finds the shortest path between two members in the family tree using BFS.
@@ -7,7 +8,8 @@ import { FamilyMemberNode } from "../graph/actions";
 export function findShortestPath(
   members: FamilyMemberNode[],
   startId: number,
-  endId: number
+  endId: number,
+  relationships?: FamilyRelationship[]
 ): FamilyMemberNode[] | null {
   if (startId === endId) {
     const member = members.find((m) => m.id === startId);
@@ -22,15 +24,12 @@ export function findShortestPath(
     memberMap.set(m.id, m);
     if (!adj.has(m.id)) adj.set(m.id, []);
 
-    // Edge to Father
-    if (m.father_id) {
-      // Child -> Father
-      adj.get(m.id)?.push(m.father_id);
-      
-      // Father -> Child
-      if (!adj.has(m.father_id)) adj.set(m.father_id, []);
-      adj.get(m.father_id)?.push(m.id);
-    }
+    getParentIds(m, relationships).forEach((parentId) => {
+      adj.get(m.id)?.push(parentId);
+
+      if (!adj.has(parentId)) adj.set(parentId, []);
+      adj.get(parentId)?.push(m.id);
+    });
   });
 
   // 2. BFS

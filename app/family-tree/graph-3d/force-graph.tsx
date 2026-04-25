@@ -2,7 +2,7 @@
 
 import { useRef, useState, useMemo, useCallback, useEffect } from "react";
 import dynamic from "next/dynamic";
-import { FamilyMemberNode } from "../graph/actions";
+import type { FamilyMemberNode, FamilyRelationship } from "../graph/actions";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -27,6 +27,7 @@ import { useTheme } from "next-themes";
 import { MemberDetailDialog } from "../member-detail-dialog";
 import { TourDialog } from "./tour-dialog";
 import { TourControls } from "./tour-controls";
+import { buildGraphEdges } from "../graph/relation-utils";
 
 // 动态导入 ForceGraph3D，禁用 SSR
 const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
@@ -40,6 +41,7 @@ const ForceGraph3D = dynamic(() => import("react-force-graph-3d"), {
 
 interface ForceGraphProps {
   data: FamilyMemberNode[];
+  relationships?: FamilyRelationship[];
 }
 
 interface GraphNode extends FamilyMemberNode {
@@ -51,7 +53,7 @@ interface GraphNode extends FamilyMemberNode {
   [key: string]: any;
 }
 
-export function FamilyForceGraph({ data }: ForceGraphProps) {
+export function FamilyForceGraph({ data, relationships }: ForceGraphProps) {
   const fgRef = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { theme } = useTheme();
@@ -110,15 +112,15 @@ export function FamilyForceGraph({ data }: ForceGraphProps) {
       group: member.generation || 0,
     }));
 
-    const links = data
-      .filter((member) => member.father_id)
-      .map((member) => ({
-        source: member.father_id!,
-        target: member.id,
-      }));
+    const links = buildGraphEdges(data, relationships).map((relation) => ({
+      source: relation.parent_id,
+      target: relation.child_id,
+      relationType: relation.parent_role,
+      relationKind: relation.relation_kind,
+    }));
 
     return { nodes, links };
-  }, [data]);
+  }, [data, relationships]);
 
   // Tour Logic
   const startTour = (path: FamilyMemberNode[]) => {
@@ -266,9 +268,9 @@ export function FamilyForceGraph({ data }: ForceGraphProps) {
   }, []);
 
   // 获取父亲姓名
-  const getFatherName = (fatherId: number | null) => {
-    if (!fatherId) return null;
-    return data.find((m) => m.id === fatherId)?.name;
+  const getMemberName = (memberId: number | null) => {
+    if (!memberId) return null;
+    return data.find((m) => m.id === memberId)?.name;
   };
 
   // 主题颜色配置
@@ -378,6 +380,7 @@ export function FamilyForceGraph({ data }: ForceGraphProps) {
         isOpen={isTourDialogOpen}
         onOpenChange={setIsTourDialogOpen}
         members={data}
+        relationships={relationships}
         onStartTour={startTour}
       />
 
@@ -398,7 +401,8 @@ export function FamilyForceGraph({ data }: ForceGraphProps) {
         isOpen={isDetailOpen}
         onOpenChange={setIsDetailOpen}
         member={selectedMember}
-        fatherName={getFatherName(selectedMember?.father_id || null)}
+        fatherName={getMemberName(selectedMember?.father_id || null)}
+        motherName={getMemberName(selectedMember?.mom_id || null)}
       />
     </div>
   );

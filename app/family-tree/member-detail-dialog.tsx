@@ -19,6 +19,7 @@ interface MemberDetailDialogProps {
   onOpenChange: (open: boolean) => void;
   member: FamilyMemberNode | null;
   fatherName?: string | null;
+  motherName?: string | null;
 }
 
 export function MemberDetailDialog({
@@ -26,6 +27,7 @@ export function MemberDetailDialog({
   onOpenChange,
   member,
   fatherName,
+  motherName,
 }: MemberDetailDialogProps) {
   const [isFlipped, setIsFlipped] = useState(false);
 
@@ -122,11 +124,17 @@ export function MemberDetailDialog({
                   <div className="space-y-5 sm:space-y-6">
                     
                     {/* Key Relations */}
-                    <div className="grid grid-cols-2 gap-4 sm:gap-6">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 sm:gap-6">
                       <div className="space-y-1">
                         <span className="text-[10px] sm:text-xs font-bold text-stone-400 dark:text-stone-500 uppercase tracking-wider">父亲</span>
                         <div className="p-2 sm:p-3 bg-stone-50 dark:bg-stone-800/50 rounded border border-stone-100 dark:border-stone-700 text-stone-800 dark:text-stone-200 font-medium text-sm sm:text-base">
                           {fatherName || "未记录"}
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <span className="text-[10px] sm:text-xs font-bold text-stone-400 dark:text-stone-500 uppercase tracking-wider">母亲</span>
+                        <div className="p-2 sm:p-3 bg-stone-50 dark:bg-stone-800/50 rounded border border-stone-100 dark:border-stone-700 text-stone-800 dark:text-stone-200 font-medium text-sm sm:text-base">
+                          {motherName || "未记录"}
                         </div>
                       </div>
                       <div className="space-y-1">
