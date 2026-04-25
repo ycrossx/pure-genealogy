@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 
+// Node payload used by both 2D and 3D graph views.
 export interface FamilyMemberNode {
   id: number;
   name: string;
@@ -23,6 +24,7 @@ export interface FetchGraphResult {
   error: string | null;
 }
 
+// Load full relationship data for graph rendering.
 export async function fetchAllFamilyMembers(): Promise<FetchGraphResult> {
   const supabase = await createClient();
 

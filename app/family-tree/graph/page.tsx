@@ -5,6 +5,7 @@ import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Box } from "lucide-react";
 
+// Lightweight loading placeholder while graph data is fetched on server.
 function GraphSkeleton() {
   return (
     <div className="w-full h-[calc(100vh-200px)] min-h-[500px] border rounded-lg bg-muted/20 animate-pulse flex items-center justify-center">
@@ -14,6 +15,7 @@ function GraphSkeleton() {
 }
 
 async function GraphLoader() {
+  // Data fetching remains on the server; client graph receives plain props.
   const { data, error } = await fetchAllFamilyMembers();
 
   if (error) {
@@ -36,6 +38,7 @@ async function GraphLoader() {
 }
 
 export default function FamilyTreeGraphPage() {
+  // This page provides 2D graph view and a switch entry to 3D view.
   return (
     <div className="container mx-auto py-8 px-4">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-0 mb-6">

@@ -2,6 +2,7 @@ import { Suspense } from "react";
 import { fetchMembersForTimeline } from "../actions";
 import { TimelineClient } from "./timeline-client";
 
+// Server wrapper keeps data-fetching near source and passes plain props to client timeline.
 async function TimelineWrapper() {
   const members = await fetchMembersForTimeline();
   return <TimelineClient initialData={members} />;

@@ -1,6 +1,7 @@
 import { updateSession } from "@/lib/supabase/proxy";
 import { type NextRequest } from "next/server";
 
+// Next.js proxy hook delegates auth/session logic to lib layer.
 export async function proxy(request: NextRequest) {
   return await updateSession(request);
 }

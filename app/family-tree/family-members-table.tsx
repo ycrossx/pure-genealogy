@@ -36,6 +36,7 @@ import {
   updateFamilyMember,
   deleteFamilyMembers,
   fetchAllMembersForSelect,
+  fetchFemaleMembersForSelect,
   fetchMemberById,
 } from "./actions";
 import { ImportMembersDialog } from "./import-members-dialog";
@@ -44,6 +45,11 @@ import { RichTextEditor } from "@/components/rich-text/editor";
 import { RichTextViewer } from "@/components/rich-text/viewer";
 import { cn } from "@/lib/utils";
 
+// Main interactive table for CRUD:
+// - search + pagination
+// - batch selection + delete
+// - add/edit dialog
+// - biography rich-text preview
 interface FamilyMembersTableProps {
   initialData: FamilyMember[];
   totalCount: number;
@@ -63,6 +69,7 @@ export function FamilyMembersTable({
   const searchParams = useSearchParams();
   const [isPending, startTransition] = React.useTransition();
 
+  // Local UI states for selection, dialogs, loading flags, and form editing.
   const [selectedIds, setSelectedIds] = React.useState<Set<number>>(new Set());
   const [isDeleting, setIsDeleting] = React.useState(false);
   const [searchInput, setSearchInput] = React.useState(searchQuery);
@@ -70,10 +77,14 @@ export function FamilyMembersTable({
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [isLoadingParents, setIsLoadingParents] = React.useState(false);
   const [loadingFatherId, setLoadingFatherId] = React.useState<number | null>(null);
+  const [loadingMotherId, setLoadingMotherId] = React.useState<number | null>(null);
 
   const [editingMember, setEditingMember] = React.useState<FamilyMember | null>(null);
   const [biographyMember, setBiographyMember] = React.useState<FamilyMember | null>(null);
   const [parentOptions, setParentOptions] = React.useState<
+    { id: number; name: string; generation: number | null }[]
+  >([]);
+  const [motherOptions, setMotherOptions] = React.useState<
     { id: number; name: string; generation: number | null }[]
   >([]);
 
@@ -83,6 +94,7 @@ export function FamilyMembersTable({
     generation: "",
     sibling_order: "",
     father_id: "",
+    mom_id: "",
     gender: "",
     official_position: "",
     is_alive: true,
@@ -102,13 +114,17 @@ export function FamilyMembersTable({
   React.useEffect(() => {
     if (isDialogOpen) {
       setIsLoadingParents(true);
-      fetchAllMembersForSelect()
-        .then(setParentOptions)
+      Promise.all([fetchAllMembersForSelect(), fetchFemaleMembersForSelect()])
+        .then(([parents, mothers]) => {
+          setParentOptions(parents);
+          setMotherOptions(mothers);
+        })
         .finally(() => setIsLoadingParents(false));
     }
   }, [isDialogOpen]);
 
   const updateUrlParams = (params: Record<string, string>) => {
+    // Keep search/pagination in URL so page state is shareable and reload-safe.
     startTransition(() => {
       const newParams = new URLSearchParams(searchParams.toString());
       Object.entries(params).forEach(([key, value]) => {
@@ -175,6 +191,7 @@ export function FamilyMembersTable({
       generation: "",
       sibling_order: "",
       father_id: "",
+      mom_id: "",
       gender: "",
       official_position: "",
       is_alive: true,
@@ -201,6 +218,7 @@ export function FamilyMembersTable({
       generation: member.generation?.toString() ?? "",
       sibling_order: member.sibling_order?.toString() ?? "",
       father_id: member.father_id?.toString() ?? "null",
+      mom_id: member.mom_id?.toString() ?? "null",
       gender: member.gender ?? "",
       official_position: member.official_position ?? "",
       is_alive: member.is_alive,
@@ -229,6 +247,7 @@ export function FamilyMembersTable({
 
     setIsSubmitting(true);
 
+    // Convert string form fields into the server action payload shape.
     const memberData = {
       name: formData.name.trim(),
       generation: formData.generation ? parseInt(formData.generation) : null,
@@ -237,6 +256,9 @@ export function FamilyMembersTable({
         : null,
       father_id: (formData.father_id && formData.father_id !== "null") 
         ? parseInt(formData.father_id) 
+        : null,
+      mom_id: (formData.mom_id && formData.mom_id !== "null")
+        ? parseInt(formData.mom_id)
         : null,
       gender: (formData.gender as "男" | "女") || null,
       official_position: formData.official_position || null,
@@ -354,6 +376,28 @@ export function FamilyMembersTable({
                           ...formData, 
                           father_id: value, 
                           generation: newGeneration 
+                        });
+                      }}
+                    />
+                  </div>
+                </div>
+
+                {/* 母亲 */}
+                <div className="grid grid-cols-4 items-center gap-4">
+                  <Label htmlFor="mom_id" className="text-right">
+                    母亲
+                  </Label>
+                  <div className="col-span-3">
+                    <FatherCombobox
+                      value={formData.mom_id}
+                      options={motherOptions}
+                      isLoading={isLoadingParents}
+                      placeholder="选择母亲..."
+                      searchPlaceholder="搜索母亲姓名或世代..."
+                      onChange={(value) => {
+                        setFormData({
+                          ...formData,
+                          mom_id: value,
                         });
                       }}
                     />
@@ -573,6 +617,7 @@ export function FamilyMembersTable({
               <TableHead className="w-20">世代</TableHead>
               <TableHead className="w-20">排行</TableHead>
               <TableHead className="w-24">父亲</TableHead>
+              <TableHead className="w-24">母亲</TableHead>
               <TableHead className="w-16">性别</TableHead>
               <TableHead>生日</TableHead>
               <TableHead>卒年</TableHead>
@@ -587,7 +632,7 @@ export function FamilyMembersTable({
           <TableBody>
             {initialData.length === 0 ? (
               <TableRow>
-                <TableCell colSpan={14} className="h-24 text-center">
+                <TableCell colSpan={16} className="h-24 text-center">
                   暂无数据
                 </TableCell>
               </TableRow>
@@ -644,6 +689,39 @@ export function FamilyMembersTable({
                           {member.father_name}
                         </button>
                         {loadingFatherId === member.father_id && (
+                          <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                        )}
+                      </div>
+                    ) : (
+                      "-"
+                    )}
+                  </TableCell>
+                  <TableCell>
+                    {member.mom_id && member.mom_name ? (
+                      <div className="flex items-center gap-1">
+                        <button
+                          type="button"
+                          disabled={loadingMotherId === member.mom_id}
+                          onClick={async () => {
+                            if (!member.mom_id) return;
+                            setLoadingMotherId(member.mom_id);
+                            try {
+                              const motherData = await fetchMemberById(member.mom_id);
+                              if (motherData) {
+                                handleOpenEditDialog(motherData);
+                              }
+                            } finally {
+                              setLoadingMotherId(null);
+                            }
+                          }}
+                          className={cn(
+                            "text-primary hover:underline cursor-pointer text-left",
+                            loadingMotherId === member.mom_id && "opacity-70 cursor-wait"
+                          )}
+                        >
+                          {member.mom_name}
+                        </button>
+                        {loadingMotherId === member.mom_id && (
                           <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
                         )}
                       </div>

@@ -23,6 +23,9 @@ interface FatherComboboxProps {
   options: ParentOption[];
   disabled?: boolean;
   isLoading?: boolean;
+  placeholder?: string;
+  emptyLabel?: string;
+  searchPlaceholder?: string;
 }
 
 export function FatherCombobox({
@@ -31,6 +34,9 @@ export function FatherCombobox({
   options,
   disabled,
   isLoading,
+  placeholder = "选择父亲...",
+  emptyLabel = "无",
+  searchPlaceholder = "搜索姓名或世代...",
 }: FatherComboboxProps) {
   const [open, setOpen] = React.useState(false);
   const [searchQuery, setSearchQuery] = React.useState("");
@@ -70,7 +76,7 @@ export function FatherCombobox({
               )}
             </span>
           ) : (
-            <span className="text-muted-foreground">选择父亲...</span>
+            <span className="text-muted-foreground">{placeholder}</span>
           )}
           <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
         </Button>
@@ -80,7 +86,7 @@ export function FatherCombobox({
           <div className="flex items-center px-2 border rounded-md">
             <Search className="mr-2 h-4 w-4 shrink-0 opacity-50" />
             <Input
-              placeholder="搜索姓名或世代..."
+              placeholder={searchPlaceholder}
               className="flex h-11 w-full rounded-md bg-transparent py-3 text-sm outline-none placeholder:text-muted-foreground border-none focus-visible:ring-0 px-0"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
@@ -105,7 +111,7 @@ export function FatherCombobox({
                 value === "null" ? "opacity-100" : "opacity-0"
               )}
             />
-            无
+            {emptyLabel}
           </Button>
           {filteredOptions.length === 0 ? (
             <div className="py-6 text-center text-sm text-muted-foreground">

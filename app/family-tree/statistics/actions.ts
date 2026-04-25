@@ -2,6 +2,7 @@
 
 import { createClient } from "@/lib/supabase/server";
 
+// Aggregated payload consumed by chart components.
 export interface StatisticsData {
   totalMembers: number;
   genderStats: { name: string; value: number; fill: string }[];
@@ -30,7 +31,7 @@ export async function fetchFamilyStatistics(): Promise<{
 
   const totalMembers = members.length;
 
-  // 1. Gender Statistics
+  // 1) Gender statistics
   const genderCounts = members.reduce(
     (acc, member) => {
       const gender = member.gender || "未知";
@@ -52,7 +53,7 @@ export async function fetchFamilyStatistics(): Promise<{
     }); // slate-400
   }
 
-  // 2. Generation Statistics
+  // 2) Generation statistics
   const generationCounts = members.reduce(
     (acc, member) => {
       const gen = member.generation ? `第${member.generation}世` : "未知";
@@ -62,7 +63,7 @@ export async function fetchFamilyStatistics(): Promise<{
     {} as Record<string, number>
   );
 
-  // Sort generations properly
+  // Keep generation bars in natural numeric order.
   const sortedGenerations = Object.keys(generationCounts).sort((a, b) => {
     if (a === "未知") return 1;
     if (b === "未知") return -1;
@@ -76,7 +77,7 @@ export async function fetchFamilyStatistics(): Promise<{
     value: generationCounts[gen],
   }));
 
-  // 3. Status Statistics (Alive vs Deceased)
+  // 3) Alive vs deceased
   const statusCounts = members.reduce(
     (acc, member) => {
       const status = member.is_alive ? "在世" : "已故";
@@ -91,7 +92,7 @@ export async function fetchFamilyStatistics(): Promise<{
     { name: "已故", value: statusCounts["已故"] || 0, fill: "#64748b" }, // slate-500
   ];
 
-  // 4. Age Statistics (for Living Members with Birthday)
+  // 4) Age distribution for living members with birthday
   const now = new Date();
   const ageGroups: Record<string, number> = {
     "0-10岁": 0,
@@ -131,16 +132,8 @@ export async function fetchFamilyStatistics(): Promise<{
     value,
   }));
 
-  // 5. Common Names (Last character of name usually indicates generation name in some families, or just frequent names)
-  // Here we just count full names (duplicates) or maybe last character if we want to guess 'Zi' (style name) usage?
-  // Let's stick to just "Most common names" (duplicates) for now, or maybe "Given Name" frequency?
-  // Chinese names: Surname (1-2 chars) + Given Name (1-2 chars).
-  // Assuming full names are stored, getting the most frequent last character might be interesting for 'Generation Name' detection.
-  // Let's try to count the specific characters in names (excluding the first character as surname, assuming 1 char surname for simplicity or just count all chars in given name).
-  // Simple approach: Count full names (detect duplicates) and maybe the second character (often generation name).
-
-  // Let's do: Most frequent Given Names (excluding surname). Assuming surname is 1st char for now (imperfect but simple).
-  // Better: Just simple duplicate name check.
+  // 5) Common generation-character trend.
+  // Current heuristic: count the second character of each name.
   const nameCounts: Record<string, number> = {};
   members.forEach((m) => {
     // Naive assumption: First char is surname.

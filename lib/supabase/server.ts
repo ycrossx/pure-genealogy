@@ -7,8 +7,10 @@ import { cookies } from "next/headers";
  * it.
  */
 export async function createClient() {
+  // Read request cookies in the current server context.
   const cookieStore = await cookies();
 
+  // Build a per-request Supabase client for server components/actions.
   return createServerClient(
     process.env.NEXT_PUBLIC_SUPABASE_URL!,
     process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY!,

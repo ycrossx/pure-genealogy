@@ -2,6 +2,7 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 import { hasEnvVars } from "../utils";
 
+// Proxy/middleware entry for keeping auth session fresh and guarding routes.
 export async function updateSession(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,

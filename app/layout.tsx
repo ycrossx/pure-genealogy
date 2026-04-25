@@ -6,6 +6,10 @@ import NextTopLoader from "nextjs-toploader";
 import "./globals.css";
 import { FAMILY_SURNAME } from "@/lib/utils";
 
+// Root layout of the whole app:
+// 1) declares metadata
+// 2) injects global fonts and styles
+// 3) mounts theme + analytics providers
 const defaultUrl = process.env.VERCEL_URL
   ? `https://${process.env.VERCEL_URL}`
   : "http://localhost:3000";
@@ -34,6 +38,7 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  // Every route is rendered inside this shell.
   return (
     <html lang="zh-CN" suppressHydrationWarning>
       <body className={`${geistSans.variable} ${notoSerifSC.variable} font-serif antialiased`}>

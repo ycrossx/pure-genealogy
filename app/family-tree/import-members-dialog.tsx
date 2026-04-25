@@ -61,6 +61,7 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
         世代: 20,
         排行: 1,
         父亲姓名: `${FAMILY_SURNAME}父名`,
+        母亲姓名: `母亲名`,
         性别: "男",
         官职: "进士",
         是否在世: "是",
@@ -104,6 +105,7 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
             generation: row["世代"] ? Number(row["世代"]) : null,
             sibling_order: row["排行"] ? Number(row["排行"]) : null,
             father_name: row["父亲姓名"] ? String(row["父亲姓名"]) : null,
+            mother_name: row["母亲姓名"] ? String(row["母亲姓名"]) : null,
             gender: (row["性别"] === "女" ? "女" : "男") as "男" | "女",
             official_position: row["官职"] ? String(row["官职"]) : null,
             is_alive: row["是否在世"] === "否" ? false : true, 
@@ -191,10 +193,10 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
             <div className="border rounded-md overflow-hidden">
               <div className="bg-muted p-2 text-sm text-muted-foreground flex justify-between items-center">
                 <span>预览 ({parsedData.length} 条记录)</span>
-                {parsedData.some(m => m.father_name) && (
+                {parsedData.some(m => m.father_name || m.mother_name) && (
                   <span className="text-xs text-amber-600 flex items-center">
                     <AlertCircle className="h-3 w-3 mr-1" />
-                    注意：父亲姓名将自动匹配现有数据库，如果匹配失败则留空
+                    注意：父亲/母亲姓名将自动匹配现有数据库，如果匹配失败则留空
                   </span>
                 )}
               </div>
@@ -205,6 +207,7 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
                       <TableHead>姓名</TableHead>
                       <TableHead>世代</TableHead>
                       <TableHead>父亲姓名</TableHead>
+                      <TableHead>母亲姓名</TableHead>
                       <TableHead>性别</TableHead>
                       <TableHead>生日</TableHead>
                       <TableHead>居住地</TableHead>
@@ -217,6 +220,9 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
                         <TableCell>{member.generation}</TableCell>
                         <TableCell className={member.father_name ? "text-primary" : "text-muted-foreground"}>
                           {member.father_name || "-"}
+                        </TableCell>
+                        <TableCell className={member.mother_name ? "text-primary" : "text-muted-foreground"}>
+                          {member.mother_name || "-"}
                         </TableCell>
                         <TableCell>{member.gender}</TableCell>
                         <TableCell>{member.birthday || "-"}</TableCell>

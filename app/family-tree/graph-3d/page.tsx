@@ -12,6 +12,7 @@ export const metadata: Metadata = {
 };
 
 async function Graph3DLoader() {
+  // Reuse the same relationship dataset as 2D view.
   const { data, error } = await fetchAllFamilyMembers();
 
   if (error) {
@@ -34,6 +35,7 @@ async function Graph3DLoader() {
 }
 
 export default function FamilyTreeGraph3DPage() {
+  // 3D graph entry page with navigation back to 2D graph.
   return (
     <div className="container mx-auto py-6 px-4">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-0 mb-6">

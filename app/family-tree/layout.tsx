@@ -5,6 +5,8 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 import { MobileNav } from "@/components/mobile-nav";
 import { FAMILY_SURNAME } from "@/lib/utils";
 
+// Shared layout for all routes under /family-tree.
+// It provides a consistent header, navigation, and auth/theme controls.
 export default function FamilyTreeLayout({
   children,
 }: {

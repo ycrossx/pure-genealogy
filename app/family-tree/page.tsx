@@ -2,9 +2,11 @@ import { Suspense } from "react";
 import { FamilyMembersLoader } from "./family-members-loader";
 
 interface PageProps {
+  // In Next.js App Router, searchParams can be async in server components.
   searchParams: Promise<{ page?: string; search?: string }>;
 }
 
+// Skeleton row ids used only for stable keys in loading state.
 const SKELETON_ROWS = ["s1", "s2", "s3", "s4", "s5", "s6", "s7", "s8", "s9", "s10"];
 
 function TableSkeleton() {
@@ -32,6 +34,7 @@ async function FamilyMembersWrapper({
 }: {
   searchParams: Promise<{ page?: string; search?: string }>;
 }) {
+  // Parse query params once on the server and pass clean values downstream.
   const params = await searchParams;
   const page = parseInt(params.page || "1", 10);
   const search = params.search || "";
@@ -41,6 +44,7 @@ async function FamilyMembersWrapper({
 }
 
 export default function FamilyTreePage({ searchParams }: PageProps) {
+  // Page component itself stays lightweight; heavy work is isolated in loader.
   return (
     <div className="container mx-auto py-8 px-4">
       <h1 className="text-3xl font-bold mb-6">族谱成员列表</h1>

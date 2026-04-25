@@ -3,6 +3,7 @@
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
 
+// Domain model used by family member list, dialogs, and related pages.
 export interface FamilyMember {
   id: number;
   name: string;
@@ -10,6 +11,8 @@ export interface FamilyMember {
   sibling_order: number | null;
   father_id: number | null;
   father_name: string | null;
+  mom_id: number | null;
+  mom_name: string | null;
   gender: "男" | "女" | null;
   official_position: string | null;
   is_alive: boolean;
@@ -27,6 +30,7 @@ export interface FetchMembersResult {
   error: string | null;
 }
 
+// Read family members with pagination + optional fuzzy search by name.
 export async function fetchFamilyMembers(
   page: number = 1,
   pageSize: number = 50,
@@ -54,28 +58,33 @@ export async function fetchFamilyMembers(
     return { data: [], count: 0, error: error.message };
   }
 
-  // 获取所有父亲 ID
-  const fatherIds = (data || [])
-    .map((item) => item.father_id)
-    .filter((id): id is number => id !== null);
+  // 获取所有父亲/母亲 ID
+  const parentIds = Array.from(
+    new Set(
+      (data || [])
+        .flatMap((item) => [item.father_id, item.mom_id])
+        .filter((id): id is number => id !== null)
+    )
+  );
 
-  // 批量查询父亲姓名
-  let fatherMap: Record<number, string> = {};
-  if (fatherIds.length > 0) {
-    const { data: fathers } = await supabase
+  // 批量查询父亲/母亲姓名
+  let parentMap: Record<number, string> = {};
+  if (parentIds.length > 0) {
+    const { data: parents } = await supabase
       .from("family_members")
       .select("id, name")
-      .in("id", fatherIds);
+      .in("id", parentIds);
 
-    if (fathers) {
-      fatherMap = Object.fromEntries(fathers.map((f) => [f.id, f.name]));
+    if (parents) {
+      parentMap = Object.fromEntries(parents.map((p) => [p.id, p.name]));
     }
   }
 
-  // 转换数据格式，添加 father_name
+  // 转换数据格式，添加 father_name/mom_name
   const transformedData: FamilyMember[] = (data || []).map((item) => ({
     ...item,
-    father_name: item.father_id ? fatherMap[item.father_id] || null : null,
+    father_name: item.father_id ? parentMap[item.father_id] || null : null,
+    mom_name: item.mom_id ? parentMap[item.mom_id] || null : null,
   }));
 
   return { data: transformedData, count: count || 0, error: null };
@@ -86,6 +95,7 @@ export interface CreateMemberInput {
   generation?: number | null;
   sibling_order?: number | null;
   father_id?: number | null;
+  mom_id?: number | null;
   gender?: "男" | "女" | null;
   official_position?: string | null;
   is_alive?: boolean;
@@ -96,6 +106,7 @@ export interface CreateMemberInput {
   residence_place?: string | null;
 }
 
+// Insert one member record.
 export async function createFamilyMember(
   input: CreateMemberInput
 ): Promise<{ success: boolean; error: string | null }> {
@@ -106,6 +117,7 @@ export async function createFamilyMember(
     generation: input.generation,
     sibling_order: input.sibling_order,
     father_id: input.father_id,
+    mom_id: input.mom_id,
     gender: input.gender,
     official_position: input.official_position,
     is_alive: input.is_alive ?? true,
@@ -147,6 +159,7 @@ export async function deleteFamilyMembers(
 }
 
 // 获取所有成员用于父亲选择下拉框
+// Lightweight dataset used by parent selection comboboxes.
 export async function fetchAllMembersForSelect(): Promise<
   { id: number; name: string; generation: number | null }[]
 > {
@@ -166,11 +179,33 @@ export async function fetchAllMembersForSelect(): Promise<
   return data || [];
 }
 
+// 获取所有女性成员用于母亲选择下拉框
+export async function fetchFemaleMembersForSelect(): Promise<
+  { id: number; name: string; generation: number | null }[]
+> {
+  const supabase = await createClient();
+
+  const { data, error } = await supabase
+    .from("family_members")
+    .select("id, name, generation")
+    .eq("gender", "女")
+    .order("generation", { ascending: true })
+    .order("name", { ascending: true });
+
+  if (error) {
+    console.error("Error fetching female members for select:", error);
+    return [];
+  }
+
+  return data || [];
+}
+
 export interface UpdateMemberInput extends CreateMemberInput {
   id: number;
 }
 
 // 根据 ID 获取单个成员
+// Fetch one record for edit dialog and detail linking.
 export async function fetchMemberById(
   id: number
 ): Promise<FamilyMember | null> {
@@ -187,23 +222,34 @@ export async function fetchMemberById(
     return null;
   }
 
-  // 如果有父亲ID，查询父亲姓名
+  // 如果有父亲/母亲 ID，查询姓名
   let father_name: string | null = null;
-  if (data.father_id) {
-    const { data: father } = await supabase
+  let mom_name: string | null = null;
+  const parentIds = [data.father_id, data.mom_id].filter(
+    (parentId): parentId is number => parentId !== null
+  );
+
+  if (parentIds.length > 0) {
+    const { data: parents } = await supabase
       .from("family_members")
-      .select("name")
-      .eq("id", data.father_id)
-      .single();
-    father_name = father?.name || null;
+      .select("id, name")
+      .in("id", parentIds);
+
+    const parentMap = Object.fromEntries(
+      (parents || []).map((parent) => [parent.id, parent.name])
+    );
+    father_name = data.father_id ? parentMap[data.father_id] || null : null;
+    mom_name = data.mom_id ? parentMap[data.mom_id] || null : null;
   }
 
   return {
     ...data,
     father_name,
+    mom_name,
   } as FamilyMember;
 }
 
+// Update one member and refresh family-tree pages.
 export async function updateFamilyMember(
   input: UpdateMemberInput
 ): Promise<{ success: boolean; error: string | null }> {
@@ -216,6 +262,7 @@ export async function updateFamilyMember(
       generation: input.generation,
       sibling_order: input.sibling_order,
       father_id: input.father_id,
+      mom_id: input.mom_id,
       gender: input.gender,
       official_position: input.official_position,
       is_alive: input.is_alive ?? true,
@@ -241,6 +288,7 @@ export interface ImportMemberInput {
   generation?: number | null;
   sibling_order?: number | null;
   father_name?: string | null; // 导入时使用姓名匹配
+  mother_name?: string | null; // 导入时使用姓名匹配
   gender?: "男" | "女" | null;
   official_position?: string | null;
   is_alive?: boolean;
@@ -250,12 +298,13 @@ export interface ImportMemberInput {
   residence_place?: string | null;
 }
 
+// Batch import rows and resolve parent names to parent ids.
 export async function batchCreateFamilyMembers(
   members: ImportMemberInput[]
 ): Promise<{ success: boolean; count: number; error: string | null }> {
   const supabase = await createClient();
 
-  // 1. 提取所有不为空的父亲姓名
+  // 1. 提取所有不为空的父亲/母亲姓名
   const fatherNames = Array.from(
     new Set(
       members
@@ -263,8 +312,15 @@ export async function batchCreateFamilyMembers(
         .filter((n): n is string => !!n)
     )
   );
+  const motherNames = Array.from(
+    new Set(
+      members
+        .map((m) => m.mother_name?.trim())
+        .filter((n): n is string => !!n)
+    )
+  );
 
-  // 2. 批量查找父亲 ID
+  // 2. 批量查找父亲/母亲 ID
   const fatherMap: Record<string, number> = {};
   if (fatherNames.length > 0) {
     const { data: foundFathers } = await supabase
@@ -281,11 +337,30 @@ export async function batchCreateFamilyMembers(
     }
   }
 
+  const motherMap: Record<string, number> = {};
+  if (motherNames.length > 0) {
+    const { data: foundMothers } = await supabase
+      .from("family_members")
+      .select("id, name")
+      .in("name", motherNames)
+      .eq("gender", "女");
+
+    if (foundMothers) {
+      foundMothers.forEach((m) => {
+        motherMap[m.name] = m.id;
+      });
+    }
+  }
+
   // 3. 构建插入数据
   const insertPayload = members.map((m) => {
     let father_id: number | null = null;
     if (m.father_name && fatherMap[m.father_name.trim()]) {
       father_id = fatherMap[m.father_name.trim()];
+    }
+    let mom_id: number | null = null;
+    if (m.mother_name && motherMap[m.mother_name.trim()]) {
+      mom_id = motherMap[m.mother_name.trim()];
     }
 
     return {
@@ -293,6 +368,7 @@ export async function batchCreateFamilyMembers(
       generation: m.generation,
       sibling_order: m.sibling_order,
       father_id: father_id,
+      mom_id: mom_id,
       gender: m.gender,
       official_position: m.official_position,
       is_alive: m.is_alive ?? true,
@@ -314,6 +390,7 @@ export async function batchCreateFamilyMembers(
   return { success: true, count: members.length, error: null };
 }
 
+// Query only timeline-required fields to reduce payload.
 export async function fetchMembersForTimeline(): Promise<
   { id: number; name: string; birthday: string | null; death_date: string | null; generation: number | null }[]
 > {
