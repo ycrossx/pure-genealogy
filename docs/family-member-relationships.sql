@@ -22,6 +22,33 @@ CREATE INDEX IF NOT EXISTS idx_family_member_relationships_child_id
 CREATE INDEX IF NOT EXISTS idx_family_member_relationships_parent_id
   ON family_member_relationships(parent_id);
 
+ALTER TABLE family_member_relationships ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow authenticated users to read family member relationships"
+  ON family_member_relationships
+  FOR SELECT
+  TO authenticated
+  USING (true);
+
+CREATE POLICY "Allow authenticated users to insert family member relationships"
+  ON family_member_relationships
+  FOR INSERT
+  TO authenticated
+  WITH CHECK (true);
+
+CREATE POLICY "Allow authenticated users to update family member relationships"
+  ON family_member_relationships
+  FOR UPDATE
+  TO authenticated
+  USING (true)
+  WITH CHECK (true);
+
+CREATE POLICY "Allow authenticated users to delete family member relationships"
+  ON family_member_relationships
+  FOR DELETE
+  TO authenticated
+  USING (true);
+
 INSERT INTO family_member_relationships (
   child_id,
   parent_id,

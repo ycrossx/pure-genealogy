@@ -36,6 +36,8 @@ import {
   ChevronDown,
   ChevronUp,
   ChevronsDown,
+  ChevronsUpDown,
+  Check,
   Download,
   Lock,
   Maximize,
@@ -43,6 +45,7 @@ import {
   MoreVertical,
   RotateCcw,
   Search,
+  TriangleAlert,
   Unlock,
   X,
 } from "lucide-react";
@@ -62,6 +65,8 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { cn } from "@/lib/utils";
 import { FamilyMemberNodeType, type FamilyNodeData } from "./family-node";
 import { GenerationNodeType } from "./generation-node";
@@ -85,6 +90,7 @@ const FAMILY_NODE_HEIGHT = 24;
 const HORIZONTAL_GAP = 90;
 const VERTICAL_GAP = 120;
 const PICKER_PAGE_SIZE = 10;
+const DEFAULT_COUNTRY = "中国";
 
 interface FamilyTreeGraphProps {
   initialData: FamilyGraphDataset;
@@ -96,8 +102,46 @@ interface FamilyTreeGraphInnerProps {
 }
 
 type AppliedFilter =
-  | { mode: "name"; name: string; upGenerations: number; downGenerations: number }
+  | { mode: "name"; name: string; address: AddressFilter; upGenerations: number; downGenerations: number }
+  | { mode: "criteria"; surname: string; address: AddressFilter; upGenerations: number; downGenerations: number }
   | { mode: "surname"; surname: string; downGenerations: number };
+
+interface AddressOption {
+  value: string;
+  label: string;
+  code?: string;
+}
+
+type AddressLevel = "province" | "city" | "district" | "town";
+
+interface AddressFilter {
+  province: string;
+  city: string;
+  district: string;
+  town: string;
+}
+
+interface AddressSelection {
+  provinceCode: string;
+  provinceLabel: string;
+  cityCode: string;
+  cityLabel: string;
+  districtCode: string;
+  districtLabel: string;
+  townCode: string;
+  townLabel: string;
+}
+
+const emptyAddressSelection: AddressSelection = {
+  provinceCode: "",
+  provinceLabel: "",
+  cityCode: "",
+  cityLabel: "",
+  districtCode: "",
+  districtLabel: "",
+  townCode: "",
+  townLabel: "",
+};
 
 interface FamilyUnit {
   id: string;
@@ -167,6 +211,140 @@ const nodeTypes: NodeTypes = {
 const edgeTypes = {
   flowing: FlowingEdge,
 };
+
+async function fetchAddressOptions(
+  level: AddressLevel,
+  params: Record<string, string> = {}
+): Promise<AddressOption[]> {
+  const searchParams = new URLSearchParams({ level, ...params });
+  const response = await fetch(`/api/address?${searchParams.toString()}`);
+  if (!response.ok) return [];
+
+  const data = (await response.json()) as { options?: AddressOption[] };
+  return data.options || [];
+}
+
+function withSelectedOption(options: AddressOption[], selectedValue: string, selectedLabel: string): AddressOption[] {
+  if (!selectedValue || options.some((option) => option.value === selectedValue)) {
+    return options;
+  }
+
+  return [{ value: selectedValue, label: selectedLabel || selectedValue, code: selectedValue }, ...options];
+}
+
+function AddressSelect({
+  value,
+  placeholder,
+  options,
+  selectedLabel,
+  disabled,
+  onChange,
+}: {
+  value: string;
+  placeholder: string;
+  options: AddressOption[];
+  selectedLabel?: string;
+  disabled?: boolean;
+  onChange: (option: AddressOption | null) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const selectOptions = useMemo(
+    () => withSelectedOption(options, value, selectedLabel || value),
+    [options, selectedLabel, value]
+  );
+  const selectedOption = useMemo(
+    () => selectOptions.find((option) => option.value === value) || null,
+    [selectOptions, value]
+  );
+  const filteredOptions = useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return selectOptions;
+
+    return selectOptions.filter((option) => {
+      const label = option.label.toLowerCase();
+      const optionValue = option.value.toLowerCase();
+      const code = option.code?.toLowerCase() || "";
+      return label.includes(keyword) || optionValue.includes(keyword) || code.includes(keyword);
+    });
+  }, [query, selectOptions]);
+
+  const selectOption = useCallback(
+    (option: AddressOption | null) => {
+      onChange(option);
+      setOpen(false);
+      setQuery("");
+    },
+    [onChange]
+  );
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          disabled={disabled}
+          className="h-9 w-36 justify-between px-3 font-normal sm:w-44"
+        >
+          <span className={cn("truncate", !selectedOption && "text-muted-foreground")}>
+            {selectedOption?.label || placeholder}
+          </span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="z-[100] w-72 p-0 sm:w-80">
+        <div className="border-b p-2">
+          <div className="flex items-center rounded-md border px-2">
+            <Search className="mr-2 h-4 w-4 shrink-0 opacity-50" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`搜索${placeholder}`}
+              className="h-9 border-0 px-0 shadow-none focus-visible:ring-0"
+            />
+          </div>
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1">
+          {value && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="mb-1 w-full justify-start font-normal text-muted-foreground"
+              onClick={() => selectOption(null)}
+            >
+              清空
+            </Button>
+          )}
+          {filteredOptions.length === 0 ? (
+            <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              暂无可选项
+            </div>
+          ) : (
+            filteredOptions.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                variant="ghost"
+                title={option.label}
+                className={cn(
+                  "h-auto min-h-9 w-full justify-start gap-2 whitespace-normal py-2 text-left font-normal",
+                  option.value === value && "bg-accent"
+                )}
+                onClick={() => selectOption(option)}
+              >
+                <Check className={cn("h-4 w-4 shrink-0", option.value === value ? "opacity-100" : "opacity-0")} />
+                <span className="min-w-0 break-words">{option.label}</span>
+              </Button>
+            ))
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
 
 function getLayoutedElements(
   members: FamilyMemberNode[],
@@ -365,7 +543,13 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   const [nameInput, setNameInput] = useState("");
   const [upGenerationsInput, setUpGenerationsInput] = useState("2");
   const [downGenerationsInput, setDownGenerationsInput] = useState("3");
+  const [addressSelection, setAddressSelection] = useState<AddressSelection>(emptyAddressSelection);
+  const [provinceOptions, setProvinceOptions] = useState<AddressOption[]>([]);
+  const [cityOptions, setCityOptions] = useState<AddressOption[]>([]);
+  const [districtOptions, setDistrictOptions] = useState<AddressOption[]>([]);
+  const [townOptions, setTownOptions] = useState<AddressOption[]>([]);
   const [appliedFilter, setAppliedFilter] = useState<AppliedFilter | null>(null);
+  const [filterWarning, setFilterWarning] = useState("");
   const [selectedCenterId, setSelectedCenterId] = useState<number | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerPage, setPickerPage] = useState(1);
@@ -388,6 +572,100 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     };
     fetchUser();
   }, []);
+
+  useEffect(() => {
+    let ignore = false;
+    fetchAddressOptions("province", { country: DEFAULT_COUNTRY }).then((options) => {
+      if (!ignore) setProvinceOptions(options);
+    });
+
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!addressSelection.provinceCode) {
+      setCityOptions([]);
+      return;
+    }
+
+    let ignore = false;
+    fetchAddressOptions("city", {
+      country: DEFAULT_COUNTRY,
+      province: addressSelection.provinceLabel,
+      parentCode: addressSelection.provinceCode,
+    }).then((options) => {
+      if (!ignore) setCityOptions(options);
+    });
+
+    return () => {
+      ignore = true;
+    };
+  }, [addressSelection.provinceCode, addressSelection.provinceLabel]);
+
+  useEffect(() => {
+    if (!addressSelection.cityCode) {
+      setDistrictOptions([]);
+      return;
+    }
+
+    let ignore = false;
+    fetchAddressOptions("district", {
+      country: DEFAULT_COUNTRY,
+      province: addressSelection.provinceLabel,
+      city: addressSelection.cityLabel,
+      parentCode: addressSelection.cityCode,
+    }).then((options) => {
+      if (!ignore) setDistrictOptions(options);
+    });
+
+    return () => {
+      ignore = true;
+    };
+  }, [addressSelection.cityCode, addressSelection.cityLabel, addressSelection.provinceLabel]);
+
+  useEffect(() => {
+    if (!addressSelection.districtCode) {
+      setTownOptions([]);
+      return;
+    }
+
+    let ignore = false;
+    fetchAddressOptions("town", {
+      country: DEFAULT_COUNTRY,
+      province: addressSelection.provinceLabel,
+      city: addressSelection.cityLabel,
+      district: addressSelection.districtLabel,
+      parentCode: addressSelection.districtCode,
+    }).then((options) => {
+      if (!ignore) setTownOptions(options);
+    });
+
+    return () => {
+      ignore = true;
+    };
+  }, [
+    addressSelection.cityLabel,
+    addressSelection.districtCode,
+    addressSelection.districtLabel,
+    addressSelection.provinceLabel,
+  ]);
+
+  const selectedAddressFilter = useMemo<AddressFilter>(
+    () => ({
+      province: addressSelection.provinceLabel,
+      city: addressSelection.cityLabel,
+      district: addressSelection.districtLabel,
+      town: addressSelection.townLabel,
+    }),
+    [
+      addressSelection.cityLabel,
+      addressSelection.districtLabel,
+      addressSelection.provinceLabel,
+      addressSelection.townLabel,
+    ]
+  );
 
   const candidateMembers = useMemo(
     () => getFilterCandidates(appliedFilter, members, relationships),
@@ -610,14 +888,37 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     const trimmedSurname = surnameInput.trim();
     const upGenerations = parseGenerationInput(upGenerationsInput, 0);
     const downGenerations = parseGenerationInput(downGenerationsInput, 3);
+    const hasAddress = hasAddressFilter(selectedAddressFilter);
+    const hasName = Boolean(trimmedName);
+    const hasSurname = Boolean(trimmedSurname);
 
     setCollapsedIds(new Set());
     setPickerPage(1);
+    setFilterWarning("");
+
+    if (!hasName && !hasSurname && !hasAddress) {
+      setAppliedFilter(null);
+      setSelectedCenterId(null);
+      setHighlightedId(null);
+      setPickerOpen(false);
+      setFilterWarning("需要其他信息才能进行筛选数据。");
+      return;
+    }
+
+    if (!hasName && !hasSurname && hasAddress) {
+      setAppliedFilter(null);
+      setSelectedCenterId(null);
+      setHighlightedId(null);
+      setPickerOpen(false);
+      setFilterWarning("仅有地址信息无法筛选，请补充姓氏、名字等更多信息。");
+      return;
+    }
 
     if (trimmedName) {
       setAppliedFilter({
         mode: "name",
         name: trimmedName,
+        address: selectedAddressFilter,
         upGenerations,
         downGenerations,
       });
@@ -625,13 +926,26 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
       return;
     }
 
-    if (trimmedSurname) {
+    if (trimmedSurname && !hasAddress) {
       setAppliedFilter({
         mode: "surname",
         surname: trimmedSurname,
-        downGenerations,
+        downGenerations: 3,
       });
       setUpGenerationsInput("0");
+      setDownGenerationsInput("3");
+      setPickerOpen(true);
+      return;
+    }
+
+    if (trimmedSurname) {
+      setAppliedFilter({
+        mode: "criteria",
+        surname: trimmedSurname,
+        address: selectedAddressFilter,
+        upGenerations,
+        downGenerations,
+      });
       setPickerOpen(true);
       return;
     }
@@ -639,14 +953,23 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     setAppliedFilter(null);
     setSelectedCenterId(null);
     setHighlightedId(null);
-  }, [nameInput, surnameInput, upGenerationsInput, downGenerationsInput]);
+    setPickerOpen(false);
+  }, [
+    nameInput,
+    selectedAddressFilter,
+    surnameInput,
+    upGenerationsInput,
+    downGenerationsInput,
+  ]);
 
   const onResetFilters = useCallback(() => {
     setSurnameInput("");
     setNameInput("");
     setUpGenerationsInput("2");
     setDownGenerationsInput("3");
+    setAddressSelection(emptyAddressSelection);
     setAppliedFilter(null);
+    setFilterWarning("");
     setSelectedCenterId(null);
     setHighlightedId(null);
     setCollapsedIds(new Set());
@@ -810,7 +1133,9 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     (pickerPage - 1) * PICKER_PAGE_SIZE,
     pickerPage * PICKER_PAGE_SIZE
   );
-  const isSurnameMode = appliedFilter?.mode === "surname" || (!!surnameInput.trim() && !nameInput.trim());
+  const isSurnameMode =
+    appliedFilter?.mode === "surname" ||
+    (!!surnameInput.trim() && !nameInput.trim() && !hasAddressFilter(selectedAddressFilter));
   const selectedCenter = members.find((member) => member.id === selectedCenterId) || null;
 
   return (
@@ -877,6 +1202,67 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
               className="h-9 w-24"
               placeholder="向下"
             />
+            <AddressSelect
+              placeholder="省"
+              value={addressSelection.provinceCode}
+              selectedLabel={addressSelection.provinceLabel}
+              options={provinceOptions}
+              onChange={(option) =>
+                setAddressSelection({
+                  ...emptyAddressSelection,
+                  provinceCode: option?.value || "",
+                  provinceLabel: option?.label || "",
+                })
+              }
+            />
+            <AddressSelect
+              placeholder="市"
+              value={addressSelection.cityCode}
+              selectedLabel={addressSelection.cityLabel}
+              options={cityOptions}
+              disabled={!addressSelection.provinceCode}
+              onChange={(option) =>
+                setAddressSelection((current) => ({
+                  ...current,
+                  cityCode: option?.value || "",
+                  cityLabel: option?.label || "",
+                  districtCode: "",
+                  districtLabel: "",
+                  townCode: "",
+                  townLabel: "",
+                }))
+              }
+            />
+            <AddressSelect
+              placeholder="县/区"
+              value={addressSelection.districtCode}
+              selectedLabel={addressSelection.districtLabel}
+              options={districtOptions}
+              disabled={!addressSelection.cityCode}
+              onChange={(option) =>
+                setAddressSelection((current) => ({
+                  ...current,
+                  districtCode: option?.value || "",
+                  districtLabel: option?.label || "",
+                  townCode: "",
+                  townLabel: "",
+                }))
+              }
+            />
+            <AddressSelect
+              placeholder="镇"
+              value={addressSelection.townCode}
+              selectedLabel={addressSelection.townLabel}
+              options={townOptions}
+              disabled={!addressSelection.districtCode}
+              onChange={(option) =>
+                setAddressSelection((current) => ({
+                  ...current,
+                  townCode: option?.value || "",
+                  townLabel: option?.label || "",
+                }))
+              }
+            />
             <Button size="sm" onClick={onApplyFilter} className="h-9">
               <Search className="mr-1 h-4 w-4" />
               应用
@@ -893,6 +1279,12 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
             >
               {selectedCenter ? selectedCenter.name : "选择支系"}
             </Button>
+            {filterWarning && (
+              <Alert className="w-full border-amber-300 bg-amber-50 text-amber-950 dark:border-amber-900 dark:bg-amber-950 dark:text-amber-100">
+                <TriangleAlert className="h-4 w-4" />
+                <AlertDescription>{filterWarning}</AlertDescription>
+              </Alert>
+            )}
           </div>
 
           <div className="pointer-events-auto flex items-center gap-2">
@@ -948,27 +1340,18 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
         </Panel>
       </ReactFlow>
 
-      {nodes.length === 0 && (
-        <div className="pointer-events-none absolute inset-x-0 top-36 z-[1] flex justify-center px-4">
-          <div className="max-w-xl rounded-lg border bg-background/95 px-6 py-5 text-center shadow-sm backdrop-blur-sm">
-            <div className="text-base font-medium">按需展示族谱树</div>
-            <div className="mt-2 text-sm text-muted-foreground">
-              输入姓名可展示其向上和向下关系；只输入姓氏时会选择该姓氏的根支系并向下展开。
-            </div>
-          </div>
-        </div>
-      )}
-
       <CandidatePickerDialog
         open={pickerOpen}
         onOpenChange={setPickerOpen}
-        title={appliedFilter?.mode === "surname" ? "选择支系" : "选择成员"}
+        title="选择支系成员"
         description={
           appliedFilter?.mode === "surname"
             ? "只输入姓氏时，请选择要展示的根支系。"
-            : "姓名匹配到多位成员，请选择一个作为中心。"
+            : "筛选条件匹配到多位成员，请选择一个作为中心。"
         }
         members={pickerItems}
+        allMembers={members}
+        relationships={relationships}
         totalCount={candidateMembers.length}
         currentPage={pickerPage}
         totalPages={pickerTotalPages}
@@ -1036,6 +1419,8 @@ function CandidatePickerDialog({
   title,
   description,
   members,
+  allMembers,
+  relationships,
   totalCount,
   currentPage,
   totalPages,
@@ -1049,6 +1434,8 @@ function CandidatePickerDialog({
   title: string;
   description: string;
   members: FamilyMemberNode[];
+  allMembers: FamilyMemberNode[];
+  relationships: FamilyRelationship[];
   totalCount: number;
   currentPage: number;
   totalPages: number;
@@ -1057,6 +1444,8 @@ function CandidatePickerDialog({
   onNext: () => void;
   onSelect: (memberId: number) => void;
 }) {
+  const memberMap = useMemo(() => new Map(allMembers.map((member) => [member.id, member])), [allMembers]);
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent>
@@ -1064,7 +1453,7 @@ function CandidatePickerDialog({
           <DialogTitle>{title}</DialogTitle>
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
-        <div className="space-y-2">
+        <div className="max-h-[60vh] space-y-2 overflow-y-auto pr-1">
           {members.length === 0 ? (
             <div className="rounded-md border border-dashed p-6 text-center text-sm text-muted-foreground">
               没有找到匹配结果。
@@ -1076,14 +1465,25 @@ function CandidatePickerDialog({
                 type="button"
                 onClick={() => onSelect(member.id)}
                 className={cn(
-                  "flex w-full items-center justify-between rounded-md border px-3 py-2 text-left text-sm transition-colors hover:bg-muted",
+                  "flex w-full flex-col gap-2 rounded-md border px-3 py-3 text-left text-sm transition-colors hover:bg-muted",
                   selectedId === member.id && "border-primary bg-primary/5"
                 )}
               >
-                <span className="font-medium">{member.name}</span>
-                <span className="text-muted-foreground">
-                  {member.generation ? `第${member.generation}世` : "世代未知"}
-                </span>
+                <div className="flex w-full flex-wrap items-center justify-between gap-2">
+                  <span className="text-base font-medium">{member.name}</span>
+                  <span className="shrink-0 text-muted-foreground">
+                    {member.generation ? `第${member.generation}世` : "世代未知"}
+                  </span>
+                </div>
+                <div className="grid w-full gap-1 text-muted-foreground sm:grid-cols-2">
+                  <span className="min-w-0 break-words">配偶：{member.spouse || "未录入"}</span>
+                  <span className="min-w-0 break-words">
+                    父母：{formatCandidateParents(member, memberMap, relationships)}
+                  </span>
+                  <span className="min-w-0 break-words sm:col-span-2">
+                    地区：{formatCandidateResidence(member)}
+                  </span>
+                </div>
               </button>
             ))
           )}
@@ -1106,6 +1506,45 @@ function CandidatePickerDialog({
   );
 }
 
+function formatCandidateParents(
+  member: FamilyMemberNode,
+  memberMap: Map<number, FamilyMemberNode>,
+  relationships: FamilyRelationship[]
+) {
+  const fatherId = getCandidateParentId(member, "father", relationships);
+  const motherId = getCandidateParentId(member, "mother", relationships);
+  const fatherName = fatherId ? memberMap.get(fatherId)?.name : "";
+  const motherName = motherId ? memberMap.get(motherId)?.name : "";
+  const parts = [
+    fatherName ? `父 ${fatherName}` : "",
+    motherName ? `母 ${motherName}` : "",
+  ].filter(Boolean);
+
+  return parts.length > 0 ? parts.join("，") : "未录入";
+}
+
+function getCandidateParentId(
+  member: FamilyMemberNode,
+  role: "father" | "mother",
+  relationships: FamilyRelationship[]
+) {
+  const relationship = relationships.find(
+    (item) => item.child_id === member.id && item.parent_role === role && item.is_primary
+  );
+  return relationship?.parent_id || (role === "father" ? member.father_id : member.mom_id);
+}
+
+function formatCandidateResidence(member: FamilyMemberNode) {
+  const parts = [
+    member.residence_province,
+    member.residence_city,
+    member.residence_district,
+    member.residence_town,
+  ].filter((part): part is string => Boolean(part));
+
+  return parts.length > 0 ? parts.join("") : member.residence_place || "未录入";
+}
+
 function getFilterCandidates(
   filter: AppliedFilter | null,
   members: FamilyMemberNode[],
@@ -1114,7 +1553,16 @@ function getFilterCandidates(
   if (!filter) return [];
 
   if (filter.mode === "name") {
-    return members.filter((member) => member.name.includes(filter.name));
+    return members.filter(
+      (member) => member.name.includes(filter.name) && memberMatchesAddressFilter(member, filter.address)
+    );
+  }
+
+  if (filter.mode === "criteria") {
+    return members.filter(
+      (member) =>
+        member.name.startsWith(filter.surname) && memberMatchesAddressFilter(member, filter.address)
+    );
   }
 
   return members.filter((member) => {
@@ -1135,6 +1583,9 @@ function getVisibleMembers(
   if (filter.mode === "name") {
     collectAncestors(centerId, filter.upGenerations, memberMap, relationships, visibleIds);
     collectDescendants(centerId, filter.downGenerations, relationships, visibleIds);
+  } else if (filter.mode === "criteria") {
+    collectAncestors(centerId, filter.upGenerations, memberMap, relationships, visibleIds);
+    collectDescendants(centerId, filter.downGenerations, relationships, visibleIds);
   } else {
     collectDescendants(centerId, filter.downGenerations, relationships, visibleIds);
   }
@@ -1142,6 +1593,19 @@ function getVisibleMembers(
   includeVisibleCoParents(visibleIds, memberMap, relationships);
 
   return members.filter((member) => visibleIds.has(member.id));
+}
+
+function hasAddressFilter(address: AddressFilter) {
+  return Boolean(address.province || address.city || address.district || address.town);
+}
+
+function memberMatchesAddressFilter(member: FamilyMemberNode, address: AddressFilter) {
+  if (address.province && member.residence_province !== address.province) return false;
+  if (address.city && member.residence_city !== address.city) return false;
+  if (address.district && member.residence_district !== address.district) return false;
+  if (address.town && member.residence_town !== address.town) return false;
+
+  return true;
 }
 
 function collectAncestors(

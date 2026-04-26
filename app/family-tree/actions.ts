@@ -342,11 +342,16 @@ export async function updateFamilyMember(
 }
 
 export interface ImportMemberInput extends ResidenceAddressFields {
+  import_code: string;
   name: string;
   generation?: number | null;
   sibling_order?: number | null;
-  father_name?: string | null; // 导入时使用姓名匹配
-  mother_name?: string | null; // 导入时使用姓名匹配
+  father_code?: string | null;
+  mother_code?: string | null;
+  father_name?: string | null; // 仅用于预览/报告核对，不参与匹配
+  mother_name?: string | null; // 仅用于预览/报告核对，不参与匹配
+  father_relation_kind?: ImportRelationKind | null;
+  mother_relation_kind?: ImportRelationKind | null;
   gender?: "男" | "女" | null;
   official_position?: string | null;
   is_alive?: boolean;
@@ -355,90 +360,243 @@ export interface ImportMemberInput extends ResidenceAddressFields {
   birthday?: string | null;
 }
 
-// Batch import rows and resolve parent names to parent ids.
+export type ImportRelationKind = "biological" | "adoptive" | "step" | "guardian" | "unknown";
+
+export interface ImportRelationReport {
+  childCode: string;
+  childName: string;
+  childId: number;
+  fatherCode: string | null;
+  fatherName: string | null;
+  fatherId: number | null;
+  fatherRelationKind: ImportRelationKind | null;
+  motherCode: string | null;
+  motherName: string | null;
+  motherId: number | null;
+  motherRelationKind: ImportRelationKind | null;
+  status: "success" | "warning" | "error";
+  message?: string;
+}
+
+export interface BatchCreateResult {
+  success: boolean;
+  count: number;
+  error: string | null;
+  codeToId: Record<string, number>;
+  resolvedRelations: ImportRelationReport[];
+  unresolvedRelations: ImportRelationReport[];
+  warnings: string[];
+}
+
+interface ImportCodeRecord {
+  id: number;
+  name: string;
+  import_code: string;
+}
+
+interface RelationshipInsertRow {
+  child_id: number;
+  parent_id: number;
+  parent_role: "father" | "mother";
+  relation_kind: ImportRelationKind;
+  is_primary: boolean;
+  notes: string | null;
+}
+
+const RELATIONSHIP_UPSERT_BATCH_SIZE = 200;
+
+function createImportFailure(
+  error: string,
+  extras: Partial<BatchCreateResult> = {}
+): BatchCreateResult {
+  return {
+    success: false,
+    count: 0,
+    error,
+    codeToId: {},
+    resolvedRelations: [],
+    unresolvedRelations: [],
+    warnings: [],
+    ...extras,
+  };
+}
+
+function normalizeRelationKind(value?: string | null): ImportRelationKind {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized || normalized === "亲生" || normalized === "生物" || normalized === "biological") {
+    return "biological";
+  }
+  if (normalized === "领养" || normalized === "收养" || normalized === "adoptive") {
+    return "adoptive";
+  }
+  if (normalized === "继亲" || normalized === "继父" || normalized === "继母" || normalized === "step") {
+    return "step";
+  }
+  if (normalized === "监护" || normalized === "guardian") {
+    return "guardian";
+  }
+  return "unknown";
+}
+
+function getImportCodeMigrationMessage(errorMessage: string): string {
+  if (errorMessage.toLowerCase().includes("import_code")) {
+    return "数据库缺少 family_members.import_code 字段，请先执行 docs/family-member-import-code.sql";
+  }
+  return errorMessage;
+}
+
+function getRelationshipWriteErrorMessage(errorMessage: string): string {
+  if (errorMessage.toLowerCase().includes("row-level security")) {
+    return "关系表被 RLS 策略拦截，请在 Supabase SQL Editor 重新执行 docs/family-member-relationships.sql 中的 RLS policy 后再导入";
+  }
+  return errorMessage;
+}
+
+// Batch import rows by stable import_code. Parent codes must already exist in the database.
 export async function batchCreateFamilyMembers(
   members: ImportMemberInput[]
-): Promise<{ success: boolean; count: number; error: string | null }> {
+): Promise<BatchCreateResult> {
   const supabase = await createClient();
+  if (members.length === 0) {
+    return createImportFailure("没有可导入的成员数据");
+  }
+
+  const normalizedMembers = members.map((member) => ({
+    ...member,
+    import_code: member.import_code?.trim() || "",
+    father_code: member.father_code?.trim() || null,
+    mother_code: member.mother_code?.trim() || null,
+    father_name: member.father_name?.trim() || null,
+    mother_name: member.mother_name?.trim() || null,
+    father_relation_kind: normalizeRelationKind(member.father_relation_kind),
+    mother_relation_kind: normalizeRelationKind(member.mother_relation_kind),
+  }));
+
+  const missingRequired = normalizedMembers.find(
+    (member) => !member.import_code || !member.name?.trim() || !member.generation || !member.gender
+  );
+  if (missingRequired) {
+    return createImportFailure(
+      `${missingRequired.name || missingRequired.import_code || "成员"} 缺少人员编号、姓名、世代或性别`
+    );
+  }
+
   const invalidMember = members.find((member) => hasStructuredResidence(member) && validateRequiredResidence(member));
   if (invalidMember) {
-    return {
-      success: false,
-      count: 0,
-      error: `${invalidMember.name || "成员"} 缺少国家、省份、城市或区县`,
-    };
+    return createImportFailure(`${invalidMember.name || "成员"} 缺少国家、省份、城市或区县`);
   }
 
-  // 1. 提取所有不为空的父亲/母亲姓名
-  const fatherNames = Array.from(
+  const importCodes = normalizedMembers.map((member) => member.import_code);
+  const duplicateCodes = importCodes.filter((code, index) => importCodes.indexOf(code) !== index);
+  if (duplicateCodes.length > 0) {
+    return createImportFailure(`人员编号重复：${Array.from(new Set(duplicateCodes)).join("、")}`);
+  }
+
+  const parentCodes = Array.from(
     new Set(
-      members
-        .map((m) => m.father_name?.trim())
-        .filter((n): n is string => !!n)
+      normalizedMembers
+        .flatMap((member) => [member.father_code, member.mother_code])
+        .filter((code): code is string => Boolean(code))
     )
   );
-  const motherNames = Array.from(
-    new Set(
-      members
-        .map((m) => m.mother_name?.trim())
-        .filter((n): n is string => !!n)
-    )
+  const selfParent = normalizedMembers.find(
+    (member) => member.import_code === member.father_code || member.import_code === member.mother_code
   );
+  if (selfParent) {
+    return createImportFailure(`${selfParent.import_code} 的父母编号不能指向自己`);
+  }
 
-  // 2. 批量查找父亲/母亲 ID
-  const fatherMap: Record<string, number> = {};
-  if (fatherNames.length > 0) {
-    const { data: foundFathers } = await supabase
+  const { data: existingDuplicates, error: duplicateError } = await supabase
+    .from("family_members")
+    .select("id, name, import_code")
+    .in("import_code", importCodes);
+
+  if (duplicateError) {
+    return createImportFailure(getImportCodeMigrationMessage(duplicateError.message));
+  }
+
+  if (existingDuplicates && existingDuplicates.length > 0) {
+    return createImportFailure(
+      `以下人员编号已存在，当前导入仅支持新增：${existingDuplicates
+        .map((member) => member.import_code)
+        .join("、")}`
+    );
+  }
+
+  const existingParentMap = new Map<string, ImportCodeRecord>();
+  if (parentCodes.length > 0) {
+    const { data: existingParents, error: parentError } = await supabase
       .from("family_members")
-      .select("id, name")
-      .in("name", fatherNames);
+      .select("id, name, import_code")
+      .in("import_code", parentCodes);
 
-    if (foundFathers) {
-      foundFathers.forEach((f) => {
-        // 注意：如果有重名，这里会覆盖，简单起见取最后一个。
-        // 实际场景可能需要更复杂的匹配逻辑（如结合世代）
-        fatherMap[f.name] = f.id;
-      });
+    if (parentError) {
+      return createImportFailure(getImportCodeMigrationMessage(parentError.message));
+    }
+
+    (existingParents || []).forEach((member) => {
+      existingParentMap.set(member.import_code, member as ImportCodeRecord);
+    });
+  }
+
+  const preflightUnresolved = normalizedMembers
+    .map((member): ImportRelationReport | null => {
+      const missing = [member.father_code, member.mother_code].filter(
+        (code): code is string => Boolean(code && !existingParentMap.has(code))
+      );
+      if (missing.length === 0) return null;
+      return {
+        childCode: member.import_code,
+        childName: member.name,
+        childId: 0,
+        fatherCode: member.father_code,
+        fatherName: member.father_name,
+        fatherId: null,
+        fatherRelationKind: member.father_code ? member.father_relation_kind : null,
+        motherCode: member.mother_code,
+        motherName: member.mother_name,
+        motherId: null,
+        motherRelationKind: member.mother_code ? member.mother_relation_kind : null,
+        status: "error" as const,
+        message: `父母编号尚未存在于数据库：${missing.join("、")}。请先导入父母批次，再导入本批次`,
+      };
+    })
+    .filter((report): report is ImportRelationReport => report !== null);
+
+  if (preflightUnresolved.length > 0) {
+    return createImportFailure("存在尚未导入的父母编号，导入已取消。请按世代分批导入，先父母后子女", {
+      unresolvedRelations: preflightUnresolved,
+    });
+  }
+
+  if (parentCodes.length > 0) {
+    const { error: relationshipPreflightError } = await supabase
+      .from("family_member_relationships")
+      .select("id")
+      .limit(1);
+
+    if (relationshipPreflightError) {
+      return createImportFailure(
+        `关系表不可用，请先执行 docs/family-member-relationships.sql：${relationshipPreflightError.message}`
+      );
     }
   }
 
-  const motherMap: Record<string, number> = {};
-  if (motherNames.length > 0) {
-    const { data: foundMothers } = await supabase
-      .from("family_members")
-      .select("id, name")
-      .in("name", motherNames)
-      .eq("gender", "女");
-
-    if (foundMothers) {
-      foundMothers.forEach((m) => {
-        motherMap[m.name] = m.id;
-      });
-    }
-  }
-
-  // 3. 构建插入数据
-  const insertPayload = members.map((m) => {
-    let father_id: number | null = null;
-    if (m.father_name && fatherMap[m.father_name.trim()]) {
-      father_id = fatherMap[m.father_name.trim()];
-    }
-    let mom_id: number | null = null;
-    if (m.mother_name && motherMap[m.mother_name.trim()]) {
-      mom_id = motherMap[m.mother_name.trim()];
-    }
-
+  const insertPayload = normalizedMembers.map((m) => {
+    const father = m.father_code ? existingParentMap.get(m.father_code) || null : null;
+    const mother = m.mother_code ? existingParentMap.get(m.mother_code) || null : null;
     const residence = normalizeResidenceAddress({
       ...m,
       residence_place: hasStructuredResidence(m) ? formatResidencePlace(m) : m.residence_place,
     });
 
     return {
+      import_code: m.import_code,
       name: m.name,
       generation: m.generation,
       sibling_order: m.sibling_order,
-      father_id: father_id,
-      mom_id: mom_id,
+      father_id: father?.id || null,
+      mom_id: mother?.id || null,
       gender: m.gender,
       official_position: m.official_position,
       is_alive: m.is_alive ?? true,
@@ -460,15 +618,118 @@ export async function batchCreateFamilyMembers(
     };
   });
 
-  // 4. 批量插入
-  const { error } = await supabase.from("family_members").insert(insertPayload);
+  const { data: insertedMembers, error: insertError } = await supabase
+    .from("family_members")
+    .insert(insertPayload)
+    .select("id, name, import_code");
 
-  if (error) {
-    return { success: false, count: 0, error: error.message };
+  if (insertError) {
+    return createImportFailure(getImportCodeMigrationMessage(insertError.message));
+  }
+
+  const insertedMap = new Map<string, ImportCodeRecord>();
+  (insertedMembers || []).forEach((member) => {
+    insertedMap.set(member.import_code, member as ImportCodeRecord);
+  });
+
+  const allCodeRecords = new Map<string, ImportCodeRecord>([
+    ...Array.from(existingParentMap.entries()),
+    ...Array.from(insertedMap.entries()),
+  ]);
+  const codeToId = Object.fromEntries(
+    Array.from(allCodeRecords.entries()).map(([code, member]) => [code, member.id])
+  );
+
+  const relationshipRows: RelationshipInsertRow[] = [];
+  const resolvedRelations: ImportRelationReport[] = [];
+  const warnings: string[] = [];
+
+  normalizedMembers.forEach((member) => {
+    const child = insertedMap.get(member.import_code);
+    if (!child) return;
+
+    const father = member.father_code ? existingParentMap.get(member.father_code) || null : null;
+    const mother = member.mother_code ? existingParentMap.get(member.mother_code) || null : null;
+
+    if (father) {
+      relationshipRows.push({
+        child_id: child.id,
+        parent_id: father.id,
+        parent_role: "father",
+        relation_kind: member.father_relation_kind || "biological",
+        is_primary: true,
+        notes: member.father_name ? `导入核对姓名：${member.father_name}` : null,
+      });
+    }
+
+    if (mother) {
+      relationshipRows.push({
+        child_id: child.id,
+        parent_id: mother.id,
+        parent_role: "mother",
+        relation_kind: member.mother_relation_kind || "biological",
+        is_primary: true,
+        notes: member.mother_name ? `导入核对姓名：${member.mother_name}` : null,
+      });
+    }
+
+    if (!father && !mother) {
+      warnings.push(`${member.import_code} ${member.name} 未填写父母编号，将作为根分支导入`);
+    }
+
+    resolvedRelations.push({
+      childCode: member.import_code,
+      childName: member.name,
+      childId: child.id,
+      fatherCode: member.father_code,
+      fatherName: father?.name || member.father_name || null,
+      fatherId: father?.id || null,
+      fatherRelationKind: father ? member.father_relation_kind || "biological" : null,
+      motherCode: member.mother_code,
+      motherName: mother?.name || member.mother_name || null,
+      motherId: mother?.id || null,
+      motherRelationKind: mother ? member.mother_relation_kind || "biological" : null,
+      status: !father && !mother ? "warning" : "success",
+      message: !father && !mother ? "未填写父母编号，作为根分支导入" : undefined,
+    });
+  });
+
+  if (relationshipRows.length > 0) {
+    for (let index = 0; index < relationshipRows.length; index += RELATIONSHIP_UPSERT_BATCH_SIZE) {
+      const batch = relationshipRows.slice(index, index + RELATIONSHIP_UPSERT_BATCH_SIZE);
+      try {
+        const { error: relationshipError } = await supabase
+          .from("family_member_relationships")
+          .upsert(batch, { onConflict: "child_id,parent_id,parent_role" });
+
+        if (relationshipError) {
+          return createImportFailure(`成员已创建，但关系表写入失败：${getRelationshipWriteErrorMessage(relationshipError.message)}`, {
+            codeToId,
+            resolvedRelations,
+            warnings,
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        return createImportFailure(`成员已创建，但关系表写入失败：${message}`, {
+          codeToId,
+          resolvedRelations,
+          warnings,
+        });
+      }
+    }
   }
 
   revalidatePath("/family-tree", "layout");
-  return { success: true, count: members.length, error: null };
+  return {
+    success: true,
+    count: normalizedMembers.length,
+    error: null,
+    codeToId,
+    resolvedRelations,
+    unresolvedRelations: [],
+    warnings,
+  };
 }
 
 // Query only timeline-required fields to reduce payload.
