@@ -24,6 +24,15 @@
 .DS_Store
 *.pem
 
+# local tools and editor state
+/.agent/
+/.agents/
+/.gemini/
+/.trae/
+/.vscode/
+/.windsurf/
+/outputs/
+
 # debug
 npm-debug.log*
 yarn-debug.log*

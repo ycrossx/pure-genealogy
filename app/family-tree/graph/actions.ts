@@ -17,6 +17,17 @@ export interface FamilyMemberNode {
   birthday: string | null;
   death_date: string | null;
   residence_place: string | null;
+  residence_country: string | null;
+  residence_country_code: string | null;
+  residence_province: string | null;
+  residence_province_code: string | null;
+  residence_city: string | null;
+  residence_city_code: string | null;
+  residence_district: string | null;
+  residence_district_code: string | null;
+  residence_town: string | null;
+  residence_town_code: string | null;
+  residence_address: string | null;
 }
 
 export type ParentRole = "father" | "mother" | "parent";
@@ -47,7 +58,7 @@ export async function fetchAllFamilyMembers(): Promise<FetchGraphResult> {
 
   const { data, error } = await supabase
     .from("family_members")
-    .select("id, name, generation, sibling_order, father_id, mom_id, gender, official_position, is_alive, spouse, remarks, birthday, death_date, residence_place")
+    .select("id, name, generation, sibling_order, father_id, mom_id, gender, official_position, is_alive, spouse, remarks, birthday, death_date, residence_place, residence_country, residence_country_code, residence_province, residence_province_code, residence_city, residence_city_code, residence_district, residence_district_code, residence_town, residence_town_code, residence_address")
     .order("generation", { ascending: true })
     .order("sibling_order", { ascending: true });
 

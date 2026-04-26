@@ -2,6 +2,8 @@
 
 import * as React from "react";
 import * as XLSX from "xlsx";
+import { AlertCircle, Download, Upload } from "lucide-react";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -12,6 +14,7 @@ import {
   DialogTitle,
   DialogTrigger,
 } from "@/components/ui/dialog";
+import { Input } from "@/components/ui/input";
 import {
   Table,
   TableBody,
@@ -20,14 +23,21 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Input } from "@/components/ui/input";
-import { Upload, Download, AlertCircle } from "lucide-react";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { batchCreateFamilyMembers, type ImportMemberInput } from "./actions";
 import { FAMILY_SURNAME } from "@/lib/utils";
+import { formatResidencePlace, hasStructuredResidence, validateRequiredResidence } from "./address-utils";
+import { batchCreateFamilyMembers, type ImportMemberInput } from "./actions";
 
 interface ImportMembersDialogProps {
   onSuccess?: () => void;
+}
+
+type ImportRow = Record<string, string | number | boolean | null | undefined>;
+
+function readCell(row: ImportRow, key: string): string | null {
+  const value = row[key];
+  if (value === undefined || value === null) return null;
+  const text = String(value).trim();
+  return text || null;
 }
 
 export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
@@ -53,7 +63,6 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
     }
   };
 
-  // 下载模板
   const handleDownloadTemplate = () => {
     const ws = XLSX.utils.json_to_sheet([
       {
@@ -61,14 +70,19 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
         世代: 20,
         排行: 1,
         父亲姓名: `${FAMILY_SURNAME}父名`,
-        母亲姓名: `母亲名`,
+        母亲姓名: "母亲名",
         性别: "男",
         官职: "进士",
         是否在世: "是",
         配偶: "王氏",
         生平事迹: "字某某",
         生日: "1990-01-01",
-        居住地: "某地",
+        国家: "中国",
+        省份: "江苏省",
+        城市: "苏州市",
+        区县: "吴中区",
+        乡镇: "木渎镇",
+        详细地址: "某村某号",
       },
     ]);
     const wb = XLSX.utils.book_new();
@@ -76,51 +90,76 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
     XLSX.writeFile(wb, "族谱成员导入模板.xlsx");
   };
 
-  // 处理文件上传
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
     if (!file) return;
 
     setIsLoading(true);
     setError(null);
 
     const reader = new FileReader();
-    reader.onload = (evt) => {
+    reader.onload = (readerEvent) => {
       try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: "binary" });
-        const wsname = wb.SheetNames[0];
-        const ws = wb.Sheets[wsname];
-        const data = XLSX.utils.sheet_to_json(ws);
+        const workbook = XLSX.read(readerEvent.target?.result, { type: "binary" });
+        const sheetName = workbook.SheetNames[0];
+        const sheet = workbook.Sheets[sheetName];
+        const rows = XLSX.utils.sheet_to_json<ImportRow>(sheet);
+        const hasNewAddressHeaders = rows.some((row) =>
+          ["国家", "省份", "城市", "区县", "乡镇", "详细地址"].some((key) =>
+            Object.prototype.hasOwnProperty.call(row, key)
+          )
+        );
 
-        if (data.length === 0) {
+        if (rows.length === 0) {
           setError("文件中没有数据");
-          setIsLoading(false);
           return;
         }
 
-        const formattedData: ImportMemberInput[] = (data as Record<string, string | number>[]).map((row) => {
-          return {
-            name: String(row["姓名"] || ""),
-            generation: row["世代"] ? Number(row["世代"]) : null,
-            sibling_order: row["排行"] ? Number(row["排行"]) : null,
-            father_name: row["父亲姓名"] ? String(row["父亲姓名"]) : null,
-            mother_name: row["母亲姓名"] ? String(row["母亲姓名"]) : null,
-            gender: (row["性别"] === "女" ? "女" : "男") as "男" | "女",
-            official_position: row["官职"] ? String(row["官职"]) : null,
-            is_alive: row["是否在世"] === "否" ? false : true, 
-            spouse: row["配偶"] ? String(row["配偶"]) : null,
-            remarks: row["生平事迹"] ? String(row["生平事迹"]) : (row["备注"] ? String(row["备注"]) : null),
-            birthday: row["生日"] ? String(row["生日"]) : null,
-            residence_place: row["居住地"] ? String(row["居住地"]) : null,
-          };
-        }).filter(item => item.name); 
+        const formattedData = rows
+          .map((row) => {
+            const member: ImportMemberInput = {
+              name: readCell(row, "姓名") || "",
+              generation: readCell(row, "世代") ? Number(readCell(row, "世代")) : null,
+              sibling_order: readCell(row, "排行") ? Number(readCell(row, "排行")) : null,
+              father_name: readCell(row, "父亲姓名"),
+              mother_name: readCell(row, "母亲姓名"),
+              gender: (readCell(row, "性别") === "女" ? "女" : "男") as ImportMemberInput["gender"],
+              official_position: readCell(row, "官职"),
+              is_alive: readCell(row, "是否在世") === "否" ? false : true,
+              spouse: readCell(row, "配偶"),
+              remarks: readCell(row, "生平事迹") || readCell(row, "备注"),
+              birthday: readCell(row, "生日"),
+              residence_country: readCell(row, "国家"),
+              residence_province: readCell(row, "省份"),
+              residence_city: readCell(row, "城市"),
+              residence_district: readCell(row, "区县"),
+              residence_town: readCell(row, "乡镇"),
+              residence_address: readCell(row, "详细地址"),
+              residence_place: readCell(row, "居住地"),
+            };
+            member.residence_place = hasStructuredResidence(member)
+              ? formatResidencePlace(member)
+              : member.residence_place;
+            return member;
+          })
+          .filter((member) => member.name);
+
+        const invalidMember = formattedData.find((member) =>
+          (hasNewAddressHeaders || hasStructuredResidence(member)) && validateRequiredResidence(member)
+        );
+        if (invalidMember) {
+          setError(`${invalidMember.name} 缺少国家、省份、城市或区县`);
+          setParsedData([]);
+          return;
+        }
 
         if (formattedData.length === 0) {
           setError("未找到有效的成员数据，请检查表头是否正确");
-        } else {
-          setParsedData(formattedData);
+          setParsedData([]);
+          return;
         }
+
+        setParsedData(formattedData);
       } catch (err) {
         console.error(err);
         setError("解析文件失败，请确保文件格式正确");
@@ -131,7 +170,6 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
     reader.readAsBinaryString(file);
   };
 
-  // 提交导入
   const handleImport = async () => {
     if (parsedData.length === 0) return;
 
@@ -152,22 +190,22 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
     <Dialog open={isOpen} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <Button variant="outline">
-          <Upload className="h-4 w-4 mr-2" />
+          <Upload className="mr-2 h-4 w-4" />
           批量导入
         </Button>
       </DialogTrigger>
-      <DialogContent className="sm:max-w-[800px] max-h-[90vh] overflow-y-auto">
+      <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-[900px]">
         <DialogHeader>
           <DialogTitle>批量导入成员</DialogTitle>
           <DialogDescription>
-            请先下载模板，填写数据后上传。支持 Excel (.xlsx, .xls) 和 CSV 格式。
+            下载模板并填写数据后上传，支持 Excel (.xlsx, .xls) 和 CSV 格式。国家、省份、城市、区县为必填。
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-4 py-4">
           <div className="flex items-center gap-4">
             <Button variant="secondary" onClick={handleDownloadTemplate} size="sm">
-              <Download className="h-4 w-4 mr-2" />
+              <Download className="mr-2 h-4 w-4" />
               下载模板
             </Button>
             <div className="flex-1">
@@ -190,13 +228,13 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
           )}
 
           {parsedData.length > 0 && (
-            <div className="border rounded-md overflow-hidden">
-              <div className="bg-muted p-2 text-sm text-muted-foreground flex justify-between items-center">
+            <div className="overflow-hidden rounded-md border">
+              <div className="flex items-center justify-between bg-muted p-2 text-sm text-muted-foreground">
                 <span>预览 ({parsedData.length} 条记录)</span>
-                {parsedData.some(m => m.father_name || m.mother_name) && (
-                  <span className="text-xs text-amber-600 flex items-center">
-                    <AlertCircle className="h-3 w-3 mr-1" />
-                    注意：父亲/母亲姓名将自动匹配现有数据库，如果匹配失败则留空
+                {parsedData.some((member) => member.father_name || member.mother_name) && (
+                  <span className="flex items-center text-xs text-amber-600">
+                    <AlertCircle className="mr-1 h-3 w-3" />
+                    父母姓名将自动匹配现有数据库，匹配失败则留空
                   </span>
                 )}
               </div>
@@ -214,8 +252,8 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {parsedData.map((member, i) => (
-                      <TableRow key={i}>
+                    {parsedData.map((member, index) => (
+                      <TableRow key={`${member.name}-${index}`}>
                         <TableCell className="font-medium">{member.name}</TableCell>
                         <TableCell>{member.generation}</TableCell>
                         <TableCell className={member.father_name ? "text-primary" : "text-muted-foreground"}>
@@ -226,7 +264,7 @@ export function ImportMembersDialog({ onSuccess }: ImportMembersDialogProps) {
                         </TableCell>
                         <TableCell>{member.gender}</TableCell>
                         <TableCell>{member.birthday || "-"}</TableCell>
-                        <TableCell>{member.residence_place || "-"}</TableCell>
+                        <TableCell>{formatResidencePlace(member) || "-"}</TableCell>
                       </TableRow>
                     ))}
                   </TableBody>

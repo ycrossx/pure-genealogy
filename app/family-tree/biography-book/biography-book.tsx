@@ -18,6 +18,7 @@ import { Input } from "@/components/ui/input";
 import { cn, FAMILY_SURNAME } from "@/lib/utils";
 import type { BiographyMember } from "./actions";
 import { RichTextViewer } from "@/components/rich-text/viewer";
+import { formatResidencePlace } from "../address-utils";
 
 interface BiographyBookProps {
     members: BiographyMember[];
@@ -35,6 +36,8 @@ const MemberPage = memo(function MemberPage({
     totalPages: number;
     formatDate: (dateStr: string | null) => string;
 }) {
+    const residencePlace = formatResidencePlace(member);
+
     return (
         <div className="w-full h-full bg-[#fdfbf7] rounded-r-lg shadow-2xl border-l-4 border-stone-300 flex flex-col relative overflow-hidden">
             {/* 页面装饰角 */}
@@ -129,12 +132,12 @@ const MemberPage = memo(function MemberPage({
                             </p>
                         </div>
                     )}
-                    {member.residence_place && (
+                    {residencePlace && (
                         <div className="space-y-0.5 col-span-2">
                             <span className="text-[10px] font-bold text-stone-400 uppercase tracking-wider">
                                 居住地
                             </span>
-                            <p className="text-sm text-stone-700">{member.residence_place}</p>
+                            <p className="text-sm text-stone-700">{residencePlace}</p>
                         </div>
                     )}
                     {member.official_position && (

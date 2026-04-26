@@ -2,6 +2,13 @@
 
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
+import {
+  formatResidencePlace,
+  hasStructuredResidence,
+  normalizeResidenceAddress,
+  validateRequiredResidence,
+  type ResidenceAddressFields,
+} from "./address-utils";
 
 // Domain model used by family member list, dialogs, and related pages.
 export interface FamilyMember {
@@ -21,6 +28,17 @@ export interface FamilyMember {
   birthday: string | null;
   death_date: string | null;
   residence_place: string | null;
+  residence_country: string | null;
+  residence_country_code: string | null;
+  residence_province: string | null;
+  residence_province_code: string | null;
+  residence_city: string | null;
+  residence_city_code: string | null;
+  residence_district: string | null;
+  residence_district_code: string | null;
+  residence_town: string | null;
+  residence_town_code: string | null;
+  residence_address: string | null;
   updated_at: string;
 }
 
@@ -90,7 +108,7 @@ export async function fetchFamilyMembers(
   return { data: transformedData, count: count || 0, error: null };
 }
 
-export interface CreateMemberInput {
+export interface CreateMemberInput extends ResidenceAddressFields {
   name: string;
   generation?: number | null;
   sibling_order?: number | null;
@@ -103,7 +121,6 @@ export interface CreateMemberInput {
   remarks?: string | null;
   birthday?: string | null;
   death_date?: string | null;
-  residence_place?: string | null;
 }
 
 // Insert one member record.
@@ -111,6 +128,12 @@ export async function createFamilyMember(
   input: CreateMemberInput
 ): Promise<{ success: boolean; error: string | null }> {
   const supabase = await createClient();
+  const validationError = validateRequiredResidence(input);
+  if (validationError) {
+    return { success: false, error: validationError };
+  }
+
+  const residence = normalizeResidenceAddress(input);
 
   const { error } = await supabase.from("family_members").insert({
     name: input.name,
@@ -125,7 +148,18 @@ export async function createFamilyMember(
     remarks: input.remarks,
     birthday: input.birthday,
     death_date: input.death_date,
-    residence_place: input.residence_place,
+    residence_place: residence.residence_place,
+    residence_country: residence.residence_country,
+    residence_country_code: residence.residence_country_code,
+    residence_province: residence.residence_province,
+    residence_province_code: residence.residence_province_code,
+    residence_city: residence.residence_city,
+    residence_city_code: residence.residence_city_code,
+    residence_district: residence.residence_district,
+    residence_district_code: residence.residence_district_code,
+    residence_town: residence.residence_town,
+    residence_town_code: residence.residence_town_code,
+    residence_address: residence.residence_address,
   });
 
   if (error) {
@@ -254,6 +288,19 @@ export async function updateFamilyMember(
   input: UpdateMemberInput
 ): Promise<{ success: boolean; error: string | null }> {
   const supabase = await createClient();
+  if (hasStructuredResidence(input)) {
+    const validationError = validateRequiredResidence(input);
+    if (validationError) {
+      return { success: false, error: validationError };
+    }
+  }
+
+  const residence = normalizeResidenceAddress({
+    ...input,
+    residence_place: hasStructuredResidence(input)
+      ? formatResidencePlace(input)
+      : input.residence_place,
+  });
 
   const { error } = await supabase
     .from("family_members")
@@ -270,7 +317,18 @@ export async function updateFamilyMember(
       remarks: input.remarks,
       birthday: input.birthday,
       death_date: input.death_date,
-      residence_place: input.residence_place,
+      residence_place: residence.residence_place,
+      residence_country: residence.residence_country,
+      residence_country_code: residence.residence_country_code,
+      residence_province: residence.residence_province,
+      residence_province_code: residence.residence_province_code,
+      residence_city: residence.residence_city,
+      residence_city_code: residence.residence_city_code,
+      residence_district: residence.residence_district,
+      residence_district_code: residence.residence_district_code,
+      residence_town: residence.residence_town,
+      residence_town_code: residence.residence_town_code,
+      residence_address: residence.residence_address,
       updated_at: new Date().toISOString(),
     })
     .eq("id", input.id);
@@ -283,7 +341,7 @@ export async function updateFamilyMember(
   return { success: true, error: null };
 }
 
-export interface ImportMemberInput {
+export interface ImportMemberInput extends ResidenceAddressFields {
   name: string;
   generation?: number | null;
   sibling_order?: number | null;
@@ -295,7 +353,6 @@ export interface ImportMemberInput {
   spouse?: string | null;
   remarks?: string | null;
   birthday?: string | null;
-  residence_place?: string | null;
 }
 
 // Batch import rows and resolve parent names to parent ids.
@@ -303,6 +360,14 @@ export async function batchCreateFamilyMembers(
   members: ImportMemberInput[]
 ): Promise<{ success: boolean; count: number; error: string | null }> {
   const supabase = await createClient();
+  const invalidMember = members.find((member) => hasStructuredResidence(member) && validateRequiredResidence(member));
+  if (invalidMember) {
+    return {
+      success: false,
+      count: 0,
+      error: `${invalidMember.name || "成员"} 缺少国家、省份、城市或区县`,
+    };
+  }
 
   // 1. 提取所有不为空的父亲/母亲姓名
   const fatherNames = Array.from(
@@ -363,6 +428,11 @@ export async function batchCreateFamilyMembers(
       mom_id = motherMap[m.mother_name.trim()];
     }
 
+    const residence = normalizeResidenceAddress({
+      ...m,
+      residence_place: hasStructuredResidence(m) ? formatResidencePlace(m) : m.residence_place,
+    });
+
     return {
       name: m.name,
       generation: m.generation,
@@ -375,7 +445,18 @@ export async function batchCreateFamilyMembers(
       spouse: m.spouse,
       remarks: m.remarks,
       birthday: m.birthday,
-      residence_place: m.residence_place,
+      residence_place: residence.residence_place,
+      residence_country: residence.residence_country,
+      residence_country_code: residence.residence_country_code,
+      residence_province: residence.residence_province,
+      residence_province_code: residence.residence_province_code,
+      residence_city: residence.residence_city,
+      residence_city_code: residence.residence_city_code,
+      residence_district: residence.residence_district,
+      residence_district_code: residence.residence_district_code,
+      residence_town: residence.residence_town,
+      residence_town_code: residence.residence_town_code,
+      residence_address: residence.residence_address,
     };
   });
 

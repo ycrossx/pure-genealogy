@@ -33,6 +33,8 @@ import "@xyflow/react/dist/style.css";
 import dagre from "@dagrejs/dagre";
 import { toPng } from "html-to-image";
 import {
+  ChevronDown,
+  ChevronUp,
   ChevronsDown,
   Download,
   Lock,
@@ -106,11 +108,21 @@ interface FamilyUnit {
 
 interface FamilyUnitNodeData extends Record<string, unknown> {
   relationKinds: RelationKind[];
+  collapsed?: boolean;
+  hasChildren?: boolean;
+  onToggleCollapse?: (id: string) => void;
 }
 
-const FamilyUnitNode = memo(function FamilyUnitNode({ data }: NodeProps<Node<FamilyUnitNodeData>>) {
+const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node<FamilyUnitNodeData>>) {
   const hasAdoptive = data.relationKinds.includes("adoptive");
   const hasNonBiological = data.relationKinds.some((kind) => kind !== "biological");
+  const handleToggle = useCallback(
+    (event: MouseEvent<HTMLButtonElement>) => {
+      event.stopPropagation();
+      data.onToggleCollapse?.(id);
+    },
+    [data, id]
+  );
 
   return (
     <div
@@ -127,6 +139,21 @@ const FamilyUnitNode = memo(function FamilyUnitNode({ data }: NodeProps<Node<Fam
       <Handle type="target" position={Position.Top} className="!h-2 !w-2 !bg-muted-foreground" />
       <div className="h-2 w-2 rounded-full bg-muted-foreground/60" />
       <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-muted-foreground" />
+      {data.hasChildren && (
+        <button
+          type="button"
+          onClick={handleToggle}
+          className={cn(
+            "absolute -bottom-3 left-1/2 z-[60] flex h-6 w-6 -translate-x-1/2 items-center justify-center rounded-full border shadow-md transition-all duration-200 hover:scale-125 active:scale-90",
+            data.collapsed
+              ? "border-primary bg-primary text-primary-foreground hover:bg-primary/90"
+              : "border-border bg-background hover:bg-muted"
+          )}
+          title={data.collapsed ? "展开后代" : "折叠后代"}
+        >
+          {data.collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+        </button>
+      )}
     </div>
   );
 });
@@ -144,17 +171,22 @@ const edgeTypes = {
 function getLayoutedElements(
   members: FamilyMemberNode[],
   relationships: FamilyRelationship[],
-  collapsedIds: Set<number>,
+  collapsedIds: Set<string>,
   highlightedId: number | null,
-  onToggleCollapse?: (id: number) => void
+  onToggleCollapse?: (id: string) => void
 ): { nodes: Node[]; edges: Edge[] } {
   if (!members.length) {
     return { nodes: [], edges: [] };
   }
 
-  const memberMap = new Map(members.map((member) => [member.id, member]));
-  const visibleMembers = applyCollapsedState(members, relationships, collapsedIds);
+  const allFamilyUnits = buildFamilyUnits(members, relationships);
+  const visibleMembers = applyCollapsedState(members, relationships, collapsedIds, allFamilyUnits);
   const visibleMemberIds = new Set(visibleMembers.map((member) => member.id));
+  const familyUnits = allFamilyUnits.filter((familyUnit) => {
+    const hasVisibleParent = familyUnit.parentIds.some((parentId) => visibleMemberIds.has(parentId));
+    const hasVisibleChild = familyUnit.childIds.some((childId) => visibleMemberIds.has(childId));
+    return hasVisibleParent && (hasVisibleChild || collapsedIds.has(familyUnit.id));
+  });
   const roots = visibleMembers.filter((member) =>
     getParentRelations(member, relationships).every((relation) => !visibleMemberIds.has(relation.parentId))
   );
@@ -177,7 +209,6 @@ function getLayoutedElements(
     });
   });
 
-  const familyUnits = buildFamilyUnits(visibleMembers, relationships);
   familyUnits.forEach((familyUnit) => {
     dagreGraph.setNode(familyUnit.id, {
       width: FAMILY_NODE_WIDTH,
@@ -272,8 +303,6 @@ function getLayoutedElements(
       ...member,
       isHighlighted: member.id === highlightedId,
       hasChildren,
-      collapsed: collapsedIds.has(member.id),
-      onToggleCollapse,
       branchColor: nodeColor,
     };
 
@@ -296,6 +325,9 @@ function getLayoutedElements(
       },
       data: {
         relationKinds: familyUnit.relationKinds,
+        collapsed: collapsedIds.has(familyUnit.id),
+        hasChildren: familyUnit.childIds.length > 0,
+        onToggleCollapse,
       },
       draggable: false,
       selectable: false,
@@ -341,7 +373,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   const [highlightedPathIds, setHighlightedPathIds] = useState<Set<string>>(new Set());
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDraggable, setIsDraggable] = useState(false);
-  const [collapsedIds, setCollapsedIds] = useState<Set<number>>(new Set());
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
   const members = dataset.members;
   const relationships = dataset.relationships;
@@ -456,7 +488,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     setHighlightedPathIds(pathSet);
   }, [highlightedId, filteredMembers, filteredRelationships, childrenMap]);
 
-  const onToggleCollapse = useCallback((id: number) => {
+  const onToggleCollapse = useCallback((id: string) => {
     setCollapsedIds((prev) => {
       const next = new Set(prev);
       if (next.has(id)) {
@@ -1173,50 +1205,80 @@ function includeVisibleCoParents(
   memberMap: Map<number, FamilyMemberNode>,
   relationships: FamilyRelationship[]
 ) {
-  let changed = true;
-  while (changed) {
-    changed = false;
-    relationships.forEach((relationship) => {
-      if (!visibleIds.has(relationship.child_id)) return;
-      if (!memberMap.has(relationship.parent_id)) return;
-      if (!visibleIds.has(relationship.parent_id)) {
+  const relationshipsByChild = new Map<number, FamilyRelationship[]>();
+
+  relationships.forEach((relationship) => {
+    const childRelationships = relationshipsByChild.get(relationship.child_id) || [];
+    childRelationships.push(relationship);
+    relationshipsByChild.set(relationship.child_id, childRelationships);
+  });
+
+  relationshipsByChild.forEach((childRelationships, childId) => {
+    if (!visibleIds.has(childId)) return;
+
+    const hasVisibleParent = childRelationships.some((relationship) => visibleIds.has(relationship.parent_id));
+    if (!hasVisibleParent) return;
+
+    childRelationships.forEach((relationship) => {
+      if (memberMap.has(relationship.parent_id)) {
         visibleIds.add(relationship.parent_id);
-        changed = true;
       }
     });
-  }
+  });
 }
 
 function applyCollapsedState(
   members: FamilyMemberNode[],
   relationships: FamilyRelationship[],
-  collapsedIds: Set<number>
+  collapsedIds: Set<string>,
+  familyUnits: FamilyUnit[]
 ): FamilyMemberNode[] {
   if (collapsedIds.size === 0) return members;
 
-  const memberMap = new Map(members.map((member) => [member.id, member]));
-  const memberIds = new Set(memberMap.keys());
+  const memberIds = new Set(members.map((member) => member.id));
   const childrenMap = buildChildrenMap(members, relationships);
-  const roots = members.filter((member) =>
-    getParentRelations(member, relationships).every((relation) => !memberIds.has(relation.parentId))
-  );
-  const visibleIds = new Set<number>();
-  const queue = roots.map((member) => member.id);
+  const visibleIds = new Set(memberIds);
 
-  while (queue.length > 0) {
-    const memberId = queue.shift()!;
-    if (visibleIds.has(memberId)) continue;
-    visibleIds.add(memberId);
+  familyUnits.forEach((familyUnit) => {
+    if (!collapsedIds.has(familyUnit.id)) return;
 
-    if (collapsedIds.has(memberId)) continue;
-    (childrenMap.get(memberId) || []).forEach((childId) => {
-      if (memberIds.has(childId)) queue.push(childId);
-    });
-  }
+    const queue = [...familyUnit.childIds];
+    const hiddenIds = new Set<number>();
+    while (queue.length > 0) {
+      const memberId = queue.shift()!;
+      if (hiddenIds.has(memberId) || !memberIds.has(memberId)) continue;
+      hiddenIds.add(memberId);
+
+      (childrenMap.get(memberId) || []).forEach((childId) => {
+        queue.push(childId);
+      });
+    }
+
+    let changed = true;
+    while (changed) {
+      changed = false;
+
+      familyUnits.forEach((relatedFamilyUnit) => {
+        if (relatedFamilyUnit.id === familyUnit.id) return;
+
+        const hasHiddenChild = relatedFamilyUnit.childIds.some((childId) => hiddenIds.has(childId));
+        const hasHiddenParent = relatedFamilyUnit.parentIds.some((parentId) => hiddenIds.has(parentId));
+        if (!hasHiddenChild && !hasHiddenParent) return;
+
+        [...relatedFamilyUnit.parentIds, ...relatedFamilyUnit.childIds].forEach((memberId) => {
+          if (memberIds.has(memberId) && !hiddenIds.has(memberId)) {
+            hiddenIds.add(memberId);
+            changed = true;
+          }
+        });
+      });
+    }
+
+    hiddenIds.forEach((memberId) => visibleIds.delete(memberId));
+  });
 
   return members.filter((member) => visibleIds.has(member.id));
 }
-
 function buildBranchColorMap(roots: FamilyMemberNode[], childrenMap: Map<number, number[]>): Map<number, HSLColor> {
   const memberBaseColorMap = new Map<number, HSLColor>();
 

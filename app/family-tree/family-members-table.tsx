@@ -29,7 +29,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Plus, Trash2, Search, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { Plus, Trash2, Search, ChevronLeft, ChevronRight, Loader2, Check, ChevronsUpDown } from "lucide-react";
 import type { FamilyMember } from "./actions";
 import {
   createFamilyMember,
@@ -44,6 +44,8 @@ import { FatherCombobox } from "./father-combobox";
 import { RichTextEditor } from "@/components/rich-text/editor";
 import { RichTextViewer } from "@/components/rich-text/viewer";
 import { cn } from "@/lib/utils";
+import { formatResidencePlace, hasStructuredResidence, validateRequiredResidence } from "./address-utils";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 
 // Main interactive table for CRUD:
 // - search + pagination
@@ -56,6 +58,152 @@ interface FamilyMembersTableProps {
   currentPage: number;
   pageSize: number;
   searchQuery: string;
+}
+
+interface AddressOption {
+  value: string;
+  label: string;
+  code?: string;
+}
+
+type AddressLevel = "country" | "province" | "city" | "district" | "town";
+
+async function fetchAddressOptions(
+  level: AddressLevel,
+  params: Record<string, string> = {}
+): Promise<AddressOption[]> {
+  const searchParams = new URLSearchParams({ level, ...params });
+  const response = await fetch(`/api/address?${searchParams.toString()}`);
+  if (!response.ok) return [];
+  const data = (await response.json()) as { options?: AddressOption[] };
+  return data.options || [];
+}
+
+function withSelectedOption(options: AddressOption[], selectedValue: string, selectedLabel: string): AddressOption[] {
+  if (!selectedValue || options.some((option) => option.value === selectedValue)) {
+    return options;
+  }
+
+  return [{ value: selectedValue, label: selectedLabel || selectedValue, code: selectedValue }, ...options];
+}
+
+function AddressSelect({
+  value,
+  placeholder,
+  options,
+  selectedLabel,
+  disabled,
+  onChange,
+  clearable,
+}: {
+  value: string;
+  placeholder: string;
+  options: AddressOption[];
+  selectedLabel?: string;
+  disabled?: boolean;
+  clearable?: boolean;
+  onChange: (option: AddressOption | null) => void;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const [query, setQuery] = React.useState("");
+  const selectOptions = React.useMemo(
+    () => withSelectedOption(options, value, selectedLabel || value),
+    [options, selectedLabel, value]
+  );
+
+  const selectedOption = React.useMemo(
+    () => selectOptions.find((option) => option.value === value) || null,
+    [selectOptions, value]
+  );
+
+  const filteredOptions = React.useMemo(() => {
+    const keyword = query.trim().toLowerCase();
+    if (!keyword) return selectOptions;
+
+    return selectOptions.filter((option) => {
+      const label = option.label.toLowerCase();
+      const optionValue = option.value.toLowerCase();
+      const code = option.code?.toLowerCase() || "";
+      return label.includes(keyword) || optionValue.includes(keyword) || code.includes(keyword);
+    });
+  }, [query, selectOptions]);
+
+  const selectOption = (option: AddressOption | null) => {
+    onChange(option);
+    setOpen(false);
+    setQuery("");
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen} modal>
+      <PopoverTrigger asChild>
+        <Button
+          type="button"
+          variant="outline"
+          role="combobox"
+          aria-expanded={open}
+          disabled={disabled}
+          className="w-full justify-between font-normal"
+        >
+          <span className={cn("truncate", !selectedOption && "text-muted-foreground")}>
+            {selectedOption?.label || placeholder}
+          </span>
+          <ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="z-[100] w-[var(--radix-popover-trigger-width)] p-0">
+        <div className="border-b p-2">
+          <div className="flex items-center rounded-md border px-2">
+            <Search className="mr-2 h-4 w-4 shrink-0 opacity-50" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={`搜索${placeholder.replace(" *", "")}`}
+              className="h-9 border-0 px-0 shadow-none focus-visible:ring-0"
+            />
+          </div>
+        </div>
+        <div className="max-h-72 overflow-y-auto p-1">
+          {clearable && value && (
+            <Button
+              type="button"
+              variant="ghost"
+              className="mb-1 w-full justify-start font-normal text-muted-foreground"
+              onClick={() => selectOption(null)}
+            >
+              清空
+            </Button>
+          )}
+          {filteredOptions.length === 0 ? (
+            <div className="px-3 py-6 text-center text-sm text-muted-foreground">
+              暂无可选项
+            </div>
+          ) : (
+            filteredOptions.map((option) => (
+              <Button
+                key={option.value}
+                type="button"
+                variant="ghost"
+                className={cn(
+                  "w-full justify-start gap-2 font-normal",
+                  option.value === value && "bg-accent"
+                )}
+                onClick={() => selectOption(option)}
+              >
+                <Check
+                  className={cn(
+                    "h-4 w-4 shrink-0",
+                    option.value === value ? "opacity-100" : "opacity-0"
+                  )}
+                />
+                <span className="truncate">{option.label}</span>
+              </Button>
+            ))
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 export function FamilyMembersTable({
@@ -87,6 +235,11 @@ export function FamilyMembersTable({
   const [motherOptions, setMotherOptions] = React.useState<
     { id: number; name: string; generation: number | null }[]
   >([]);
+  const [countryOptions, setCountryOptions] = React.useState<AddressOption[]>([]);
+  const [provinceOptions, setProvinceOptions] = React.useState<AddressOption[]>([]);
+  const [cityOptions, setCityOptions] = React.useState<AddressOption[]>([]);
+  const [districtOptions, setDistrictOptions] = React.useState<AddressOption[]>([]);
+  const [townOptions, setTownOptions] = React.useState<AddressOption[]>([]);
 
   // 新增表单状态
   const [formData, setFormData] = React.useState({
@@ -103,6 +256,17 @@ export function FamilyMembersTable({
     birthday: "",
     death_date: "",
     residence_place: "",
+    residence_country: "中国",
+    residence_country_code: "CN",
+    residence_province: "",
+    residence_province_code: "",
+    residence_city: "",
+    residence_city_code: "",
+    residence_district: "",
+    residence_district_code: "",
+    residence_town: "",
+    residence_town_code: "",
+    residence_address: "",
   });
 
   const totalPages = Math.ceil(totalCount / pageSize);
@@ -122,6 +286,83 @@ export function FamilyMembersTable({
         .finally(() => setIsLoadingParents(false));
     }
   }, [isDialogOpen]);
+
+  React.useEffect(() => {
+    if (!isDialogOpen) return;
+    fetchAddressOptions("country").then(setCountryOptions);
+  }, [isDialogOpen]);
+
+  React.useEffect(() => {
+    if (!isDialogOpen || !formData.residence_country) {
+      setProvinceOptions([]);
+      return;
+    }
+
+    fetchAddressOptions("province", {
+      country: formData.residence_country,
+      parentCode: formData.residence_country_code,
+    }).then(setProvinceOptions);
+  }, [isDialogOpen, formData.residence_country, formData.residence_country_code]);
+
+  React.useEffect(() => {
+    if (!isDialogOpen || !formData.residence_country || !formData.residence_province) {
+      setCityOptions([]);
+      return;
+    }
+
+    fetchAddressOptions("city", {
+      country: formData.residence_country,
+      province: formData.residence_province,
+      parentCode: formData.residence_province_code,
+    }).then(setCityOptions);
+  }, [isDialogOpen, formData.residence_country, formData.residence_province, formData.residence_province_code]);
+
+  React.useEffect(() => {
+    if (
+      !isDialogOpen ||
+      !formData.residence_country ||
+      !formData.residence_province ||
+      !formData.residence_city
+    ) {
+      setDistrictOptions([]);
+      return;
+    }
+
+    fetchAddressOptions("district", {
+      country: formData.residence_country,
+      province: formData.residence_province,
+      city: formData.residence_city,
+      parentCode: formData.residence_city_code,
+    }).then(setDistrictOptions);
+  }, [isDialogOpen, formData.residence_country, formData.residence_province, formData.residence_city, formData.residence_city_code]);
+
+  React.useEffect(() => {
+    if (
+      !isDialogOpen ||
+      !formData.residence_country ||
+      !formData.residence_province ||
+      !formData.residence_city ||
+      !formData.residence_district
+    ) {
+      setTownOptions([]);
+      return;
+    }
+
+    fetchAddressOptions("town", {
+      country: formData.residence_country,
+      province: formData.residence_province,
+      city: formData.residence_city,
+      district: formData.residence_district,
+      parentCode: formData.residence_district_code,
+    }).then(setTownOptions);
+  }, [
+    isDialogOpen,
+    formData.residence_country,
+    formData.residence_province,
+    formData.residence_city,
+    formData.residence_district,
+    formData.residence_district_code,
+  ]);
 
   const updateUrlParams = (params: Record<string, string>) => {
     // Keep search/pagination in URL so page state is shareable and reload-safe.
@@ -200,6 +441,17 @@ export function FamilyMembersTable({
       birthday: "",
       death_date: "",
       residence_place: "",
+      residence_country: "中国",
+      residence_country_code: "CN",
+      residence_province: "",
+      residence_province_code: "",
+      residence_city: "",
+      residence_city_code: "",
+      residence_district: "",
+      residence_district_code: "",
+      residence_town: "",
+      residence_town_code: "",
+      residence_address: "",
     });
     setEditingMember(null);
   };
@@ -227,6 +479,17 @@ export function FamilyMembersTable({
       birthday: member.birthday ?? "",
       death_date: member.death_date ?? "",
       residence_place: member.residence_place ?? "",
+      residence_country: member.residence_country ?? "",
+      residence_country_code: member.residence_country_code ?? "",
+      residence_province: member.residence_province ?? "",
+      residence_province_code: member.residence_province_code ?? "",
+      residence_city: member.residence_city ?? "",
+      residence_city_code: member.residence_city_code ?? "",
+      residence_district: member.residence_district ?? "",
+      residence_district_code: member.residence_district_code ?? "",
+      residence_town: member.residence_town ?? "",
+      residence_town_code: member.residence_town_code ?? "",
+      residence_address: member.residence_address ?? "",
     });
     setIsDialogOpen(true);
   };
@@ -245,7 +508,14 @@ export function FamilyMembersTable({
       return;
     }
 
+    const residenceError = validateRequiredResidence(formData);
+    if (residenceError) {
+      alert(residenceError);
+      return;
+    }
+
     setIsSubmitting(true);
+    const residencePlace = formatResidencePlace(formData);
 
     // Convert string form fields into the server action payload shape.
     const memberData = {
@@ -267,7 +537,18 @@ export function FamilyMembersTable({
       remarks: formData.remarks || null,
       birthday: formData.birthday || null,
       death_date: (!formData.is_alive && formData.death_date) ? formData.death_date : null,
-      residence_place: formData.residence_place || null,
+      residence_place: residencePlace,
+      residence_country: formData.residence_country.trim(),
+      residence_country_code: formData.residence_country_code.trim() || null,
+      residence_province: formData.residence_province.trim(),
+      residence_province_code: formData.residence_province_code.trim() || null,
+      residence_city: formData.residence_city.trim(),
+      residence_city_code: formData.residence_city_code.trim() || null,
+      residence_district: formData.residence_district.trim(),
+      residence_district_code: formData.residence_district_code.trim() || null,
+      residence_town: formData.residence_town.trim() || null,
+      residence_town_code: formData.residence_town_code.trim() || null,
+      residence_address: formData.residence_address.trim() || null,
     };
 
     const result = isEditMode && editingMember
@@ -479,17 +760,114 @@ export function FamilyMembersTable({
 
                 {/* 居住地 */}
                 <div className="grid grid-cols-4 items-center gap-4">
-                  <Label htmlFor="residence_place" className="text-right">
+                  <Label className="text-right">
                     居住地
                   </Label>
-                  <Input
-                    id="residence_place"
-                    value={formData.residence_place}
-                    onChange={(e) =>
-                      setFormData({ ...formData, residence_place: e.target.value })
-                    }
-                    className="col-span-3"
-                  />
+                  <div className="col-span-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <AddressSelect
+                      value={formData.residence_country_code || formData.residence_country}
+                      selectedLabel={formData.residence_country}
+                      placeholder="国家 *"
+                      options={countryOptions}
+                      onChange={(option) =>
+                        setFormData({
+                          ...formData,
+                          residence_country: option?.label || "",
+                          residence_country_code: option?.code || option?.value || "",
+                          residence_province: "",
+                          residence_province_code: "",
+                          residence_city: "",
+                          residence_city_code: "",
+                          residence_district: "",
+                          residence_district_code: "",
+                          residence_town: "",
+                          residence_town_code: "",
+                        })
+                      }
+                    />
+                    <AddressSelect
+                      value={formData.residence_province_code || formData.residence_province}
+                      selectedLabel={formData.residence_province}
+                      placeholder="省份 *"
+                      options={provinceOptions}
+                      disabled={!formData.residence_country}
+                      onChange={(option) =>
+                        setFormData({
+                          ...formData,
+                          residence_province: option?.label || "",
+                          residence_province_code: option?.code || option?.value || "",
+                          residence_city: "",
+                          residence_city_code: "",
+                          residence_district: "",
+                          residence_district_code: "",
+                          residence_town: "",
+                          residence_town_code: "",
+                        })
+                      }
+                    />
+                    <AddressSelect
+                      value={formData.residence_city_code || formData.residence_city}
+                      selectedLabel={formData.residence_city}
+                      placeholder="城市 *"
+                      options={cityOptions}
+                      disabled={!formData.residence_province}
+                      onChange={(option) =>
+                        setFormData({
+                          ...formData,
+                          residence_city: option?.label || "",
+                          residence_city_code: option?.code || option?.value || "",
+                          residence_district: "",
+                          residence_district_code: "",
+                          residence_town: "",
+                          residence_town_code: "",
+                        })
+                      }
+                    />
+                    <AddressSelect
+                      value={formData.residence_district_code || formData.residence_district}
+                      selectedLabel={formData.residence_district}
+                      placeholder="区县 *"
+                      options={districtOptions}
+                      disabled={!formData.residence_city}
+                      onChange={(option) =>
+                        setFormData({
+                          ...formData,
+                          residence_district: option?.label || "",
+                          residence_district_code: option?.code || option?.value || "",
+                          residence_town: "",
+                          residence_town_code: "",
+                        })
+                      }
+                    />
+                    <AddressSelect
+                      value={formData.residence_town_code || formData.residence_town}
+                      selectedLabel={formData.residence_town}
+                      placeholder="乡镇"
+                      options={townOptions}
+                      disabled={!formData.residence_district}
+                      clearable
+                      onChange={(option) => {
+                        const nextTown = option?.label || "";
+                        const nextTownCode = option?.code || option?.value || "";
+                        setFormData((current) => ({
+                          ...current,
+                          residence_town: nextTown,
+                          residence_town_code: nextTownCode,
+                        }));
+                      }}
+                    />
+                    <Input
+                      id="residence_address"
+                      placeholder="详细地址"
+                      value={formData.residence_address}
+                      onChange={(e) => setFormData({ ...formData, residence_address: e.target.value })}
+                    />
+                    {formData.residence_place && !hasStructuredResidence(formData) && (
+                      <p className="text-xs text-muted-foreground sm:col-span-2">
+                        历史居住地：{formData.residence_place}
+                      </p>
+                    )}
+                  </div>
                 </div>
 
                 {/* 官职 */}
@@ -746,7 +1124,7 @@ export function FamilyMembersTable({
                         })()
                       : "-"}
                   </TableCell>
-                  <TableCell>{member.residence_place ?? "-"}</TableCell>
+                  <TableCell>{formatResidencePlace(member) ?? "-"}</TableCell>
                   <TableCell>{member.official_position ?? "-"}</TableCell>
                   <TableCell>{member.is_alive ? "是" : "否"}</TableCell>
                   <TableCell>{member.spouse ?? "-"}</TableCell>

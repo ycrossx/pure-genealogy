@@ -14,6 +14,17 @@ export interface BiographyMember {
     spouse: string | null;
     official_position: string | null;
     residence_place: string | null;
+    residence_country: string | null;
+    residence_country_code: string | null;
+    residence_province: string | null;
+    residence_province_code: string | null;
+    residence_city: string | null;
+    residence_city_code: string | null;
+    residence_district: string | null;
+    residence_district_code: string | null;
+    residence_town: string | null;
+    residence_town_code: string | null;
+    residence_address: string | null;
     remarks: string;
     father_name: string | null;
 }
@@ -92,6 +103,17 @@ export async function fetchMembersWithBiography(): Promise<{
         spouse: item.spouse,
         official_position: item.official_position,
         residence_place: item.residence_place,
+        residence_country: item.residence_country,
+        residence_country_code: item.residence_country_code,
+        residence_province: item.residence_province,
+        residence_province_code: item.residence_province_code,
+        residence_city: item.residence_city,
+        residence_city_code: item.residence_city_code,
+        residence_district: item.residence_district,
+        residence_district_code: item.residence_district_code,
+        residence_town: item.residence_town,
+        residence_town_code: item.residence_town_code,
+        residence_address: item.residence_address,
         remarks: item.remarks,
         father_name: item.father_id ? fatherMap[item.father_id] || null : null,
     }));

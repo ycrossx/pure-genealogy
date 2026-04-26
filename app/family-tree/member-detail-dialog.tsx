@@ -13,6 +13,7 @@ import { ScrollArea } from "@/components/ui/scroll-area";
 import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import { formatResidencePlace } from "./address-utils";
 
 interface MemberDetailDialogProps {
   isOpen: boolean;
@@ -39,6 +40,7 @@ export function MemberDetailDialog({
   }, [isOpen, member]);
 
   if (!member) return null;
+  const residencePlace = formatResidencePlace(member);
 
   const formatDate = (dateStr: string | null) => {
     if (!dateStr) return "-";
@@ -164,7 +166,7 @@ export function MemberDetailDialog({
                     <div className="space-y-1">
                       <span className="text-[10px] sm:text-xs font-bold text-stone-400 dark:text-stone-500 uppercase tracking-wider">居住地</span>
                       <p className="text-stone-700 dark:text-stone-300 flex items-center gap-2 text-sm sm:text-base">
-                        {member.residence_place || "未记录"}
+                        {residencePlace || "未记录"}
                       </p>
                     </div>
 
