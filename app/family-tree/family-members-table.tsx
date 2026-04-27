@@ -252,6 +252,7 @@ export function FamilyMembersTable({
     official_position: "",
     is_alive: true,
     spouse: "",
+    spouse_id: "",
     remarks: "",
     birthday: "",
     death_date: "",
@@ -437,6 +438,7 @@ export function FamilyMembersTable({
       official_position: "",
       is_alive: true,
       spouse: "",
+      spouse_id: "",
       remarks: "",
       birthday: "",
       death_date: "",
@@ -475,6 +477,7 @@ export function FamilyMembersTable({
       official_position: member.official_position ?? "",
       is_alive: member.is_alive,
       spouse: member.spouse ?? "",
+      spouse_id: member.spouse_id?.toString() ?? "null",
       remarks: member.remarks ?? "",
       birthday: member.birthday ?? "",
       death_date: member.death_date ?? "",
@@ -534,6 +537,9 @@ export function FamilyMembersTable({
       official_position: formData.official_position || null,
       is_alive: formData.is_alive,
       spouse: formData.spouse || null,
+      spouse_id: (formData.spouse_id && formData.spouse_id !== "null")
+        ? parseInt(formData.spouse_id)
+        : null,
       remarks: formData.remarks || null,
       birthday: formData.birthday || null,
       death_date: (!formData.is_alive && formData.death_date) ? formData.death_date : null,
@@ -930,8 +936,31 @@ export function FamilyMembersTable({
 
                 {/* 配偶 */}
                 <div className="grid grid-cols-4 items-center gap-4">
+                  <Label className="text-right">
+                    配偶成员
+                  </Label>
+                  <div className="col-span-3">
+                    <FatherCombobox
+                      value={formData.spouse_id}
+                      options={parentOptions.filter((option) => option.id !== editingMember?.id)}
+                      isLoading={isLoadingParents}
+                      placeholder="选择配偶成员..."
+                      searchPlaceholder="搜索配偶姓名或世代..."
+                      onChange={(value) => {
+                        const spouse = parentOptions.find((option) => option.id.toString() === value);
+                        setFormData({
+                          ...formData,
+                          spouse_id: value,
+                          spouse: spouse?.name || formData.spouse,
+                        });
+                      }}
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-4 items-center gap-4">
                   <Label htmlFor="spouse" className="text-right">
-                    配偶
+                    配偶备注
                   </Label>
                   <Input
                     id="spouse"

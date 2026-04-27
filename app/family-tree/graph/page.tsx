@@ -1,11 +1,9 @@
 import { Suspense } from "react";
-import { fetchAllFamilyMembers } from "./actions";
 import { FamilyTreeGraph } from "./family-tree-graph";
 import Link from "next/link";
 import { Button } from "@/components/ui/button";
 import { Box } from "lucide-react";
 
-// Lightweight loading placeholder while graph data is fetched on server.
 function GraphSkeleton() {
   return (
     <div className="w-full h-[calc(100vh-200px)] min-h-[500px] border rounded-lg bg-muted/20 animate-pulse flex items-center justify-center">
@@ -15,30 +13,21 @@ function GraphSkeleton() {
 }
 
 async function GraphLoader() {
-  // Data fetching remains on the server; client graph receives plain props.
-  const { data, error } = await fetchAllFamilyMembers();
-
-  if (error) {
-    return (
-      <div className="bg-destructive/10 text-destructive p-4 rounded-lg">
-        <p>加载数据失败: {error}</p>
-      </div>
-    );
-  }
-
-  if (data.members.length === 0) {
-    return (
-      <div className="bg-muted/50 text-muted-foreground p-8 rounded-lg text-center">
-        <p>暂无族谱数据，请先添加成员。</p>
-      </div>
-    );
-  }
-
-  return <FamilyTreeGraph initialData={data} />;
+  // Relationship graph data is fetched on demand after the user applies filters.
+  return (
+    <FamilyTreeGraph
+      initialData={{
+        members: [],
+        relationships: [],
+        spouseRelationships: [],
+        seedIds: [],
+        contextIds: [],
+      }}
+    />
+  );
 }
 
 export default function FamilyTreeGraphPage() {
-  // This page provides 2D graph view and a switch entry to 3D view.
   return (
     <div className="container mx-auto py-8 px-4">
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 sm:gap-0 mb-6">

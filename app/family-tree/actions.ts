@@ -24,6 +24,7 @@ export interface FamilyMember {
   official_position: string | null;
   is_alive: boolean;
   spouse: string | null;
+  spouse_id?: number | null;
   remarks: string | null;
   birthday: string | null;
   death_date: string | null;
@@ -104,6 +105,7 @@ export async function fetchFamilyMembers(
     father_name: item.father_id ? parentMap[item.father_id] || null : null,
     mom_name: item.mom_id ? parentMap[item.mom_id] || null : null,
   }));
+  await applyStructuredSpouseNames(supabase, transformedData);
 
   return { data: transformedData, count: count || 0, error: null };
 }
@@ -118,6 +120,7 @@ export interface CreateMemberInput extends ResidenceAddressFields {
   official_position?: string | null;
   is_alive?: boolean;
   spouse?: string | null;
+  spouse_id?: number | null;
   remarks?: string | null;
   birthday?: string | null;
   death_date?: string | null;
@@ -135,7 +138,7 @@ export async function createFamilyMember(
 
   const residence = normalizeResidenceAddress(input);
 
-  const { error } = await supabase.from("family_members").insert({
+  const { data: insertedMember, error } = await supabase.from("family_members").insert({
     name: input.name,
     generation: input.generation,
     sibling_order: input.sibling_order,
@@ -160,10 +163,17 @@ export async function createFamilyMember(
     residence_town: residence.residence_town,
     residence_town_code: residence.residence_town_code,
     residence_address: residence.residence_address,
-  });
+  }).select("id").single();
 
   if (error) {
     return { success: false, error: error.message };
+  }
+
+  if (insertedMember?.id && input.spouse_id) {
+    const spouseError = await replaceSpouseRelationship(supabase, insertedMember.id, input.spouse_id);
+    if (spouseError) {
+      return { success: false, error: spouseError };
+    }
   }
 
   revalidatePath("/family-tree", "layout");
@@ -276,11 +286,14 @@ export async function fetchMemberById(
     mom_name = data.mom_id ? parentMap[data.mom_id] || null : null;
   }
 
-  return {
+  const member = {
     ...data,
     father_name,
     mom_name,
   } as FamilyMember;
+  await applyStructuredSpouseNames(supabase, [member]);
+  member.spouse_id = await fetchPrimarySpouseId(supabase, member.id);
+  return member;
 }
 
 // Update one member and refresh family-tree pages.
@@ -337,6 +350,11 @@ export async function updateFamilyMember(
     return { success: false, error: error.message };
   }
 
+  const spouseError = await replaceSpouseRelationship(supabase, input.id, input.spouse_id || null);
+  if (spouseError) {
+    return { success: false, error: spouseError };
+  }
+
   revalidatePath("/family-tree", "layout");
   return { success: true, error: null };
 }
@@ -356,6 +374,7 @@ export interface ImportMemberInput extends ResidenceAddressFields {
   official_position?: string | null;
   is_alive?: boolean;
   spouse?: string | null;
+  spouse_code?: string | null;
   remarks?: string | null;
   birthday?: string | null;
 }
@@ -399,6 +418,14 @@ interface RelationshipInsertRow {
   parent_id: number;
   parent_role: "father" | "mother";
   relation_kind: ImportRelationKind;
+  is_primary: boolean;
+  notes: string | null;
+}
+
+interface SpouseInsertRow {
+  member_id: number;
+  spouse_id: number;
+  relation_kind: "spouse";
   is_primary: boolean;
   notes: string | null;
 }
@@ -452,6 +479,119 @@ function getRelationshipWriteErrorMessage(errorMessage: string): string {
   return errorMessage;
 }
 
+function getSpouseWriteErrorMessage(errorMessage: string): string {
+  const lowerMessage = errorMessage.toLowerCase();
+  if (lowerMessage.includes("family_member_spouses")) {
+    return "配偶关系表不可用，请先执行 docs/family-member-spouses.sql";
+  }
+  if (lowerMessage.includes("row-level security")) {
+    return "配偶关系表被 RLS 策略拦截，请重新执行 docs/family-member-spouses.sql 中的 RLS policy 后再保存";
+  }
+  return errorMessage;
+}
+
+async function applyStructuredSpouseNames(supabase: any, members: FamilyMember[]) {
+  const memberIds = members.map((member) => member.id);
+  if (memberIds.length === 0) return;
+
+  const { data, error } = await supabase
+    .from("family_member_spouses")
+    .select("member_id, spouse_id")
+    .or(`member_id.in.(${memberIds.join(",")}),spouse_id.in.(${memberIds.join(",")})`);
+
+  if (error || !data || data.length === 0) return;
+
+  const spouseIds = Array.from(
+    new Set(
+      data
+        .flatMap((relationship: { member_id: number; spouse_id: number }) => [
+          relationship.member_id,
+          relationship.spouse_id,
+        ])
+        .filter((id: number) => !memberIds.includes(id))
+    )
+  );
+  const inPageMemberMap = new Map(members.map((member) => [member.id, member.name]));
+  let externalSpouseMap = new Map<number, string>();
+
+  if (spouseIds.length > 0) {
+    const { data: spouseMembers } = await supabase
+      .from("family_members")
+      .select("id, name")
+      .in("id", spouseIds);
+    externalSpouseMap = new Map(
+      (spouseMembers || []).map((member: { id: number; name: string }) => [member.id, member.name])
+    );
+  }
+
+  const spouseNames = new Map<number, string[]>();
+  data.forEach((relationship: { member_id: number; spouse_id: number }) => {
+    const memberName = inPageMemberMap.get(relationship.member_id) || externalSpouseMap.get(relationship.member_id);
+    const spouseName = inPageMemberMap.get(relationship.spouse_id) || externalSpouseMap.get(relationship.spouse_id);
+    if (spouseName) {
+      spouseNames.set(relationship.member_id, [...(spouseNames.get(relationship.member_id) || []), spouseName]);
+    }
+    if (memberName) {
+      spouseNames.set(relationship.spouse_id, [...(spouseNames.get(relationship.spouse_id) || []), memberName]);
+    }
+  });
+
+  members.forEach((member) => {
+    const names = spouseNames.get(member.id);
+    if (names?.length) {
+      member.spouse = Array.from(new Set(names)).join("、");
+    }
+  });
+}
+
+async function replaceSpouseRelationship(
+  supabase: any,
+  memberId: number,
+  spouseId: number | null
+): Promise<string | null> {
+  const { error: deleteError } = await supabase
+    .from("family_member_spouses")
+    .delete()
+    .or(`member_id.eq.${memberId},spouse_id.eq.${memberId}`);
+
+  if (deleteError) {
+    return getSpouseWriteErrorMessage(deleteError.message);
+  }
+
+  if (!spouseId) return null;
+  if (memberId === spouseId) {
+    return "配偶不能选择本人";
+  }
+
+  const { error: insertError } = await supabase
+    .from("family_member_spouses")
+    .upsert(
+      {
+        member_id: Math.min(memberId, spouseId),
+        spouse_id: Math.max(memberId, spouseId),
+        relation_kind: "spouse",
+        is_primary: true,
+        notes: null,
+      },
+      { onConflict: "member_low_id,member_high_id" }
+    );
+
+  return insertError ? getSpouseWriteErrorMessage(insertError.message) : null;
+}
+
+async function fetchPrimarySpouseId(supabase: any, memberId: number): Promise<number | null> {
+  const { data, error } = await supabase
+    .from("family_member_spouses")
+    .select("member_id, spouse_id")
+    .or(`member_id.eq.${memberId},spouse_id.eq.${memberId}`)
+    .eq("is_primary", true)
+    .limit(1)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  return data.member_id === memberId ? data.spouse_id : data.member_id;
+}
+
 // Batch import rows by stable import_code. Parent codes must already exist in the database.
 export async function batchCreateFamilyMembers(
   members: ImportMemberInput[]
@@ -466,6 +606,7 @@ export async function batchCreateFamilyMembers(
     import_code: member.import_code?.trim() || "",
     father_code: member.father_code?.trim() || null,
     mother_code: member.mother_code?.trim() || null,
+    spouse_code: member.spouse_code?.trim() || null,
     father_name: member.father_name?.trim() || null,
     mother_name: member.mother_name?.trim() || null,
     father_relation_kind: normalizeRelationKind(member.father_relation_kind),
@@ -499,11 +640,18 @@ export async function batchCreateFamilyMembers(
         .filter((code): code is string => Boolean(code))
     )
   );
+  const spouseCodes = Array.from(
+    new Set(normalizedMembers.map((member) => member.spouse_code).filter((code): code is string => Boolean(code)))
+  );
   const selfParent = normalizedMembers.find(
     (member) => member.import_code === member.father_code || member.import_code === member.mother_code
   );
   if (selfParent) {
     return createImportFailure(`${selfParent.import_code} 的父母编号不能指向自己`);
+  }
+  const selfSpouse = normalizedMembers.find((member) => member.import_code === member.spouse_code);
+  if (selfSpouse) {
+    return createImportFailure(`${selfSpouse.import_code} 的配偶编码不能指向自己`);
   }
 
   const { data: existingDuplicates, error: duplicateError } = await supabase
@@ -524,11 +672,12 @@ export async function batchCreateFamilyMembers(
   }
 
   const existingParentMap = new Map<string, ImportCodeRecord>();
-  if (parentCodes.length > 0) {
+  const existingRelationCodes = Array.from(new Set([...parentCodes, ...spouseCodes]));
+  if (existingRelationCodes.length > 0) {
     const { data: existingParents, error: parentError } = await supabase
       .from("family_members")
       .select("id, name, import_code")
-      .in("import_code", parentCodes);
+      .in("import_code", existingRelationCodes);
 
     if (parentError) {
       return createImportFailure(getImportCodeMigrationMessage(parentError.message));
@@ -641,6 +790,7 @@ export async function batchCreateFamilyMembers(
   );
 
   const relationshipRows: RelationshipInsertRow[] = [];
+  const spouseRows = new Map<string, SpouseInsertRow>();
   const resolvedRelations: ImportRelationReport[] = [];
   const warnings: string[] = [];
 
@@ -650,6 +800,7 @@ export async function batchCreateFamilyMembers(
 
     const father = member.father_code ? existingParentMap.get(member.father_code) || null : null;
     const mother = member.mother_code ? existingParentMap.get(member.mother_code) || null : null;
+    const spouse = member.spouse_code ? allCodeRecords.get(member.spouse_code) || null : null;
 
     if (father) {
       relationshipRows.push({
@@ -675,6 +826,20 @@ export async function batchCreateFamilyMembers(
 
     if (!father && !mother) {
       warnings.push(`${member.import_code} ${member.name} 未填写父母编号，将作为根分支导入`);
+    }
+
+    if (member.spouse_code && spouse) {
+      const member_id = Math.min(child.id, spouse.id);
+      const spouse_id = Math.max(child.id, spouse.id);
+      spouseRows.set(`${member_id}-${spouse_id}`, {
+        member_id,
+        spouse_id,
+        relation_kind: "spouse",
+        is_primary: true,
+        notes: member.spouse ? `导入配偶文本：${member.spouse}` : null,
+      });
+    } else if (member.spouse_code && !spouse) {
+      warnings.push(`${member.import_code} ${member.name} 的配偶编码 ${member.spouse_code} 未找到，已保留配偶文本`);
     }
 
     resolvedRelations.push({
@@ -717,6 +882,17 @@ export async function batchCreateFamilyMembers(
           warnings,
         });
       }
+    }
+  }
+
+  const spousePayload = Array.from(spouseRows.values());
+  if (spousePayload.length > 0) {
+    const { error: spouseError } = await supabase
+      .from("family_member_spouses")
+      .upsert(spousePayload, { onConflict: "member_low_id,member_high_id" });
+
+    if (spouseError) {
+      warnings.push(getSpouseWriteErrorMessage(spouseError.message));
     }
   }
 

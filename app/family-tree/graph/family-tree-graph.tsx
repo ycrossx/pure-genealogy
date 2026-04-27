@@ -75,7 +75,13 @@ import { GenerationNodeType } from "./generation-node";
 import { toChineseNum } from "./utils/chinese-num";
 import { getBranchBaseColor, generateBranchColor, type HSLColor } from "./utils/colors";
 import { FlowingEdge } from "./flowing-edge";
-import type { FamilyGraphDataset, FamilyMemberNode, FamilyRelationship, RelationKind } from "./actions";
+import {
+  fetchFamilyGraphByFilter,
+  type FamilyGraphDataset,
+  type FamilyMemberNode,
+  type FamilyRelationship,
+  type RelationKind,
+} from "./actions";
 import {
   buildChildrenMap,
   getParentRelations,
@@ -100,13 +106,14 @@ interface FamilyTreeGraphProps {
 
 interface FamilyTreeGraphInnerProps {
   dataset: FamilyGraphDataset;
+  onDatasetChange: (dataset: FamilyGraphDataset) => void;
   onMemberClick?: (member: FamilyMemberNode) => void;
 }
 
 type AppliedFilter =
   | { mode: "name"; name: string; address: AddressFilter; upGenerations: number; downGenerations: number }
   | { mode: "criteria"; surname: string; address: AddressFilter; upGenerations: number; downGenerations: number }
-  | { mode: "surname"; surname: string; downGenerations: number };
+  | { mode: "surname"; surname: string; address: AddressFilter; downGenerations: number };
 
 interface AddressOption {
   value: string;
@@ -599,6 +606,7 @@ function getLayoutedElements(
 
 const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   dataset,
+  onDatasetChange,
   onMemberClick,
 }: FamilyTreeGraphInnerProps) {
   const reactFlowInstance = useReactFlow();
@@ -615,6 +623,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   const [townOptions, setTownOptions] = useState<AddressOption[]>([]);
   const [appliedFilter, setAppliedFilter] = useState<AppliedFilter | null>(null);
   const [filterWarning, setFilterWarning] = useState("");
+  const [isFiltering, setIsFiltering] = useState(false);
   const [selectedCenterId, setSelectedCenterId] = useState<number | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerPage, setPickerPage] = useState(1);
@@ -735,8 +744,14 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   );
 
   const candidateMembers = useMemo(
-    () => getFilterCandidates(appliedFilter, members, relationships),
-    [appliedFilter, members, relationships]
+    () => {
+      if (dataset.seedIds.length > 0) {
+        const seedIds = new Set(dataset.seedIds);
+        return members.filter((member) => seedIds.has(member.id));
+      }
+      return getFilterCandidates(appliedFilter, members, relationships);
+    },
+    [appliedFilter, dataset.seedIds, members, relationships]
   );
 
   useEffect(() => {
@@ -759,9 +774,9 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   }, [selectedCenterId]);
 
   const filteredMembers = useMemo(() => {
-    if (!appliedFilter || !selectedCenterId) return [];
-    return getVisibleMembers(appliedFilter, selectedCenterId, members, relationships);
-  }, [appliedFilter, selectedCenterId, members, relationships]);
+    if (!appliedFilter) return [];
+    return members;
+  }, [appliedFilter, members]);
 
   const filteredMemberIds = useMemo(
     () => new Set(filteredMembers.map((member) => member.id)),
@@ -1026,7 +1041,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     };
   }, []);
 
-  const onApplyFilter = useCallback(() => {
+  const onApplyFilterOld = useCallback(() => {
     const trimmedName = nameInput.trim();
     const trimmedSurname = surnameInput.trim();
     const upGenerations = parseGenerationInput(upGenerationsInput, 0);
@@ -1073,6 +1088,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
       setAppliedFilter({
         mode: "surname",
         surname: trimmedSurname,
+        address: selectedAddressFilter,
         downGenerations: 3,
       });
       setUpGenerationsInput("0");
@@ -1105,6 +1121,95 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     downGenerationsInput,
   ]);
 
+  const onApplyFilter = useCallback(async () => {
+    const trimmedName = nameInput.trim();
+    const trimmedSurname = surnameInput.trim();
+    const upGenerations = parseGenerationInput(upGenerationsInput, 0);
+    const downGenerations = parseGenerationInput(downGenerationsInput, 3);
+    const hasAddress = hasAddressFilter(selectedAddressFilter);
+    const hasName = Boolean(trimmedName);
+    const hasSurname = Boolean(trimmedSurname);
+
+    setCollapsedIds(new Set());
+    setPickerPage(1);
+    setFilterWarning("");
+
+    if (!hasAddress) {
+      setAppliedFilter(null);
+      onDatasetChange({ members: [], relationships: [], spouseRelationships: [], seedIds: [], contextIds: [] });
+      setSelectedCenterId(null);
+      setHighlightedId(null);
+      setPickerOpen(false);
+      setFilterWarning("必须加入地址后才能筛选族谱关系图数据。");
+      return;
+    }
+
+    if (!hasName && !hasSurname) {
+      setAppliedFilter(null);
+      onDatasetChange({ members: [], relationships: [], spouseRelationships: [], seedIds: [], contextIds: [] });
+      setSelectedCenterId(null);
+      setHighlightedId(null);
+      setPickerOpen(false);
+      setFilterWarning("需要姓氏或名字等更多信息才能进行筛选数据。");
+      return;
+    }
+
+    let nextFilter: AppliedFilter;
+    if (hasName) {
+      nextFilter = {
+        mode: "name",
+        name: trimmedName,
+        address: selectedAddressFilter,
+        upGenerations,
+        downGenerations,
+      };
+    } else if (hasSurname) {
+      nextFilter = {
+        mode: "surname",
+        surname: trimmedSurname,
+        address: selectedAddressFilter,
+        downGenerations: 3,
+      };
+      setUpGenerationsInput("0");
+      setDownGenerationsInput("3");
+    } else {
+      return;
+    }
+
+    setIsFiltering(true);
+    try {
+      const { data, error } = await fetchFamilyGraphByFilter(nextFilter);
+
+      if (error) {
+        setAppliedFilter(null);
+        onDatasetChange({ members: [], relationships: [], spouseRelationships: [], seedIds: [], contextIds: [] });
+        setSelectedCenterId(null);
+        setHighlightedId(null);
+        setPickerOpen(false);
+        setFilterWarning(`加载族谱关系失败：${error}`);
+        return;
+      }
+
+      onDatasetChange(data);
+      setAppliedFilter(nextFilter);
+      setSelectedCenterId(null);
+      setHighlightedId(null);
+      setPickerOpen(data.members.length > 0);
+      if (data.members.length === 0) {
+        setFilterWarning("没有找到匹配的族谱成员。");
+      }
+    } finally {
+      setIsFiltering(false);
+    }
+  }, [
+    downGenerationsInput,
+    nameInput,
+    onDatasetChange,
+    selectedAddressFilter,
+    surnameInput,
+    upGenerationsInput,
+  ]);
+
   const onResetFilters = useCallback(() => {
     setSurnameInput("");
     setNameInput("");
@@ -1112,12 +1217,13 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     setDownGenerationsInput("3");
     setAddressSelection(emptyAddressSelection);
     setAppliedFilter(null);
+    onDatasetChange({ members: [], relationships: [], spouseRelationships: [], seedIds: [], contextIds: [] });
     setFilterWarning("");
     setSelectedCenterId(null);
     setHighlightedId(null);
     setCollapsedIds(new Set());
     setPickerOpen(false);
-  }, []);
+  }, [onDatasetChange]);
 
   const onExpandAll = useCallback(() => {
     setCollapsedIds(new Set());
@@ -1408,9 +1514,9 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
                 }))
               }
             />
-            <Button size="sm" onClick={onApplyFilter} className="h-9">
+            <Button size="sm" onClick={onApplyFilter} disabled={isFiltering} className="h-9">
               <Search className="mr-1 h-4 w-4" />
-              应用
+              {isFiltering ? "查询中" : "应用"}
             </Button>
             <Button size="icon" variant="ghost" onClick={onResetFilters} title="重置筛选" className="h-9 w-9">
               <X className="h-4 w-4" />
@@ -1522,26 +1628,27 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
 });
 
 export function FamilyTreeGraph({ initialData }: FamilyTreeGraphProps) {
+  const [graphData, setGraphData] = useState(initialData);
   const [selectedMember, setSelectedMember] = useState<FamilyMemberNode | null>(null);
   const [isDetailOpen, setIsDetailOpen] = useState(false);
 
   const getMemberName = useCallback(
     (memberId: number | null) => {
       if (!memberId) return null;
-      return initialData.members.find((member) => member.id === memberId)?.name || null;
+      return graphData.members.find((member) => member.id === memberId)?.name || null;
     },
-    [initialData.members]
+    [graphData.members]
   );
 
   const getPrimaryParentId = useCallback(
     (member: FamilyMemberNode | null, role: "father" | "mother") => {
       if (!member) return null;
-      const relationship = initialData.relationships.find(
+      const relationship = graphData.relationships.find(
         (item) => item.child_id === member.id && item.parent_role === role && item.is_primary
       );
       return relationship?.parent_id || (role === "father" ? member.father_id : member.mom_id);
     },
-    [initialData.relationships]
+    [graphData.relationships]
   );
 
   const handleMemberClick = useCallback((member: FamilyMemberNode) => {
@@ -1549,10 +1656,20 @@ export function FamilyTreeGraph({ initialData }: FamilyTreeGraphProps) {
     setIsDetailOpen(true);
   }, []);
 
+  const handleDatasetChange = useCallback((dataset: FamilyGraphDataset) => {
+    setGraphData(dataset);
+    setSelectedMember(null);
+    setIsDetailOpen(false);
+  }, []);
+
   return (
     <>
       <ReactFlowProvider>
-        <FamilyTreeGraphInner dataset={initialData} onMemberClick={handleMemberClick} />
+        <FamilyTreeGraphInner
+          dataset={graphData}
+          onDatasetChange={handleDatasetChange}
+          onMemberClick={handleMemberClick}
+        />
       </ReactFlowProvider>
 
       <MemberDetailDialog
