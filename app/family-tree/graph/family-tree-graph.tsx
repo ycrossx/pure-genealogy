@@ -7,6 +7,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type MouseEvent,
 } from "react";
 import { createClient } from "@/lib/supabase/client";
@@ -47,6 +48,7 @@ import {
   Search,
   TriangleAlert,
   Unlock,
+  Users,
   X,
 } from "lucide-react";
 
@@ -85,8 +87,8 @@ import { MemberDetailDialog } from "../member-detail-dialog";
 
 const NODE_WIDTH = 160;
 const NODE_HEIGHT = 120;
-const FAMILY_NODE_WIDTH = 36;
-const FAMILY_NODE_HEIGHT = 24;
+const FAMILY_NODE_WIDTH = 118;
+const FAMILY_NODE_HEIGHT = 40;
 const HORIZONTAL_GAP = 90;
 const VERTICAL_GAP = 120;
 const PICKER_PAGE_SIZE = 10;
@@ -148,13 +150,37 @@ interface FamilyUnit {
   parentIds: number[];
   childIds: number[];
   relationKinds: RelationKind[];
+  parents: FamilyUnitParent[];
+  childrenCount: number;
+  branchColor: string;
+  label: string;
+  description: string;
+  isMultiPartnerBranch: boolean;
+}
+
+interface FamilyUnitParent {
+  id: number;
+  name: string;
+  role: ParentRelation["relationType"];
 }
 
 interface FamilyUnitNodeData extends Record<string, unknown> {
   relationKinds: RelationKind[];
+  parentIds: number[];
+  childIds: number[];
+  parents: FamilyUnitParent[];
+  childrenCount: number;
+  label: string;
+  description: string;
+  branchColor: string;
+  isMultiPartnerBranch: boolean;
   collapsed?: boolean;
   hasChildren?: boolean;
+  isPathHighlighted?: boolean;
+  isDimmed?: boolean;
   onToggleCollapse?: (id: string) => void;
+  onOpenDetails?: (id: string) => void;
+  onHoverFamilyUnit?: (id: string | null) => void;
 }
 
 const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node<FamilyUnitNodeData>>) {
@@ -167,22 +193,42 @@ const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node
     },
     [data, id]
   );
+  const handleOpenDetails = useCallback(() => {
+    data.onOpenDetails?.(id);
+  }, [data, id]);
+  const handleMouseEnter = useCallback(() => {
+    data.onHoverFamilyUnit?.(id);
+  }, [data, id]);
+  const handleMouseLeave = useCallback(() => {
+    data.onHoverFamilyUnit?.(null);
+  }, [data]);
 
   return (
-    <div
+    <button
+      type="button"
+      onClick={handleOpenDetails}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
       className={cn(
-        "relative flex h-6 w-9 items-center justify-center rounded-full border bg-background shadow-sm",
+        "relative flex h-10 w-[118px] items-center justify-center gap-1 rounded-full border bg-background px-3 text-xs shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md",
+        data.isDimmed && "opacity-25 grayscale",
+        data.isPathHighlighted && "z-40 scale-105 ring-2 ring-amber-300/70",
         hasAdoptive
           ? "border-violet-400 bg-violet-50 dark:bg-violet-950"
           : hasNonBiological
             ? "border-amber-400 bg-amber-50 dark:bg-amber-950"
-            : "border-muted-foreground/30"
+            : data.isMultiPartnerBranch
+              ? "border-[var(--family-branch-color)]"
+              : "border-muted-foreground/30"
       )}
-      title={getRelationKindLabel(data.relationKinds)}
+      style={{ "--family-branch-color": data.branchColor } as CSSProperties}
+      title={data.description}
     >
-      <Handle type="target" position={Position.Top} className="!h-2 !w-2 !bg-muted-foreground" />
-      <div className="h-2 w-2 rounded-full bg-muted-foreground/60" />
-      <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-muted-foreground" />
+      <Handle type="target" position={Position.Top} className="!h-2 !w-2 !bg-[var(--family-branch-color)]" />
+      <Users className="h-3.5 w-3.5 shrink-0 text-[var(--family-branch-color)]" />
+      <span className="min-w-0 truncate font-medium">{data.label}</span>
+      <span className="shrink-0 text-[10px] text-muted-foreground">{data.childrenCount}</span>
+      <Handle type="source" position={Position.Bottom} className="!h-2 !w-2 !bg-[var(--family-branch-color)]" />
       {data.hasChildren && (
         <button
           type="button"
@@ -198,7 +244,7 @@ const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node
           {data.collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
         </button>
       )}
-    </div>
+    </button>
   );
 });
 
@@ -351,7 +397,10 @@ function getLayoutedElements(
   relationships: FamilyRelationship[],
   collapsedIds: Set<string>,
   highlightedId: number | null,
-  onToggleCollapse?: (id: string) => void
+  hoveredFamilyUnitId: string | null,
+  onToggleCollapse?: (id: string) => void,
+  onOpenFamilyDetails?: (id: string) => void,
+  onHoverFamilyUnit?: (id: string | null) => void
 ): { nodes: Node[]; edges: Edge[] } {
   if (!members.length) {
     return { nodes: [], edges: [] };
@@ -407,9 +456,12 @@ function getLayoutedElements(
         type: "flowing",
         animated: false,
         style: {
-          stroke: "hsl(var(--muted-foreground))",
+          stroke: familyUnit.branchColor,
           strokeWidth: 1.5,
-          opacity: 0.35,
+          opacity: 0.42,
+        },
+        data: {
+          branchColor: familyUnit.branchColor,
         },
       });
     });
@@ -417,7 +469,7 @@ function getLayoutedElements(
     familyUnit.childIds.forEach((childId) => {
       if (!visibleMemberIds.has(childId)) return;
       dagreGraph.setEdge(familyUnit.id, String(childId), { weight: 6 });
-      const edgeStyle = getChildEdgeStyle(familyUnit.relationKinds);
+      const edgeStyle = getChildEdgeStyle(familyUnit.relationKinds, familyUnit.branchColor);
       edges.push({
         id: `e-family-${familyUnit.id}-${childId}`,
         source: familyUnit.id,
@@ -427,6 +479,7 @@ function getLayoutedElements(
         style: edgeStyle,
         data: {
           relationKind: familyUnit.relationKinds.join(","),
+          branchColor: familyUnit.branchColor,
         },
       });
     });
@@ -435,6 +488,7 @@ function getLayoutedElements(
   dagre.layout(dagreGraph);
 
   const parentFamilyCounts = countParentFamilyUnits(familyUnits);
+  spreadMultiPartnerFamilyUnits(dagreGraph, familyUnits, parentFamilyCounts);
   familyUnits.forEach((familyUnit) => {
     if (familyUnit.parentIds.length !== 2) return;
     const [firstParentId, secondParentId] = familyUnit.parentIds;
@@ -475,8 +529,8 @@ function getLayoutedElements(
 
     const baseColor = memberBaseColorMap.get(member.id);
     const genOffset = (member.generation || rootGeneration) - (rootGeneration + 1);
-    const nodeColor = baseColor ? generateBranchColor(baseColor, Math.max(0, genOffset)) : undefined;
-
+    const familyColor = findPrimaryChildFamilyColor(member.id, familyUnits);
+    const nodeColor = familyColor || (baseColor ? generateBranchColor(baseColor, Math.max(0, genOffset)) : undefined);
     const nodeData: FamilyNodeData = {
       ...member,
       isHighlighted: member.id === highlightedId,
@@ -503,9 +557,20 @@ function getLayoutedElements(
       },
       data: {
         relationKinds: familyUnit.relationKinds,
+        parentIds: familyUnit.parentIds,
+        childIds: familyUnit.childIds,
+        parents: familyUnit.parents,
+        childrenCount: familyUnit.childrenCount,
+        label: familyUnit.label,
+        description: familyUnit.description,
+        branchColor: familyUnit.branchColor,
+        isMultiPartnerBranch: familyUnit.isMultiPartnerBranch,
         collapsed: collapsedIds.has(familyUnit.id),
         hasChildren: familyUnit.childIds.length > 0,
         onToggleCollapse,
+        onOpenDetails: onOpenFamilyDetails,
+        onHoverFamilyUnit,
+        isPathHighlighted: hoveredFamilyUnitId === familyUnit.id,
       },
       draggable: false,
       selectable: false,
@@ -555,6 +620,8 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   const [pickerPage, setPickerPage] = useState(1);
   const [highlightedId, setHighlightedId] = useState<number | null>(null);
   const [highlightedPathIds, setHighlightedPathIds] = useState<Set<string>>(new Set());
+  const [hoveredFamilyUnitId, setHoveredFamilyUnitId] = useState<string | null>(null);
+  const [selectedFamilyUnitId, setSelectedFamilyUnitId] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isDraggable, setIsDraggable] = useState(false);
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
@@ -766,6 +833,44 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     setHighlightedPathIds(pathSet);
   }, [highlightedId, filteredMembers, filteredRelationships, childrenMap]);
 
+  const familyUnitsForDetails = useMemo(
+    () => buildFamilyUnits(filteredMembers, filteredRelationships),
+    [filteredMembers, filteredRelationships]
+  );
+
+  const hoveredFamilyPathIds = useMemo(() => {
+    if (!hoveredFamilyUnitId) return new Set<string>();
+
+    const familyUnit = familyUnitsForDetails.find((unit) => unit.id === hoveredFamilyUnitId);
+    if (!familyUnit) return new Set<string>();
+
+    const pathSet = new Set<string>([familyUnit.id]);
+    familyUnit.parentIds.forEach((parentId) => {
+      pathSet.add(String(parentId));
+      pathSet.add(`e-parent-${parentId}-${familyUnit.id}`);
+    });
+
+    const queue = [...familyUnit.childIds];
+    const visited = new Set<number>();
+    while (queue.length > 0) {
+      const memberId = queue.shift()!;
+      if (visited.has(memberId)) continue;
+      visited.add(memberId);
+      pathSet.add(String(memberId));
+
+      familyUnitsForDetails
+        .filter((unit) => unit.childIds.includes(memberId))
+        .forEach((unit) => {
+          pathSet.add(unit.id);
+          pathSet.add(`e-family-${unit.id}-${memberId}`);
+        });
+
+      (childrenMap.get(memberId) || []).forEach((childId) => queue.push(childId));
+    }
+
+    return pathSet;
+  }, [childrenMap, familyUnitsForDetails, hoveredFamilyUnitId]);
+
   const onToggleCollapse = useCallback((id: string) => {
     setCollapsedIds((prev) => {
       const next = new Set(prev);
@@ -777,6 +882,12 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
       return next;
     });
   }, []);
+  const onOpenFamilyDetails = useCallback((id: string) => {
+    setSelectedFamilyUnitId(id);
+  }, []);
+  const onHoverFamilyUnit = useCallback((id: string | null) => {
+    setHoveredFamilyUnitId(id);
+  }, []);
 
   const { nodes: initialNodes, edges: initialEdges } = useMemo(
     () =>
@@ -785,9 +896,21 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
         filteredRelationships,
         collapsedIds,
         highlightedId,
-        onToggleCollapse
+        hoveredFamilyUnitId,
+        onToggleCollapse,
+        onOpenFamilyDetails,
+        onHoverFamilyUnit
       ),
-    [filteredMembers, filteredRelationships, collapsedIds, highlightedId, onToggleCollapse]
+    [
+      filteredMembers,
+      filteredRelationships,
+      collapsedIds,
+      highlightedId,
+      hoveredFamilyUnitId,
+      onToggleCollapse,
+      onOpenFamilyDetails,
+      onHoverFamilyUnit,
+    ]
   );
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
@@ -802,11 +925,12 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
   }, [initialEdges, setEdges]);
 
   useEffect(() => {
-    const hasHighlight = highlightedId !== null;
+    const hasHighlight = highlightedId !== null || hoveredFamilyUnitId !== null;
+    const activePathIds = new Set([...highlightedPathIds, ...hoveredFamilyPathIds]);
 
     setNodes((currentNodes) =>
       currentNodes.map((node) => {
-        if (node.type === "generationLabel" || node.type === "familyUnit") {
+        if (node.type === "generationLabel") {
           return {
             ...node,
             style: {
@@ -817,7 +941,23 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
           };
         }
 
-        const isPathNode = highlightedPathIds.has(node.id);
+        if (node.type === "familyUnit") {
+          const isPathNode = activePathIds.has(node.id);
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              isPathHighlighted: isPathNode,
+              isDimmed: hasHighlight && !isPathNode,
+            },
+            style: {
+              ...node.style,
+              transition: "opacity 0.3s ease",
+            },
+          };
+        }
+
+        const isPathNode = activePathIds.has(node.id);
         return {
           ...node,
           data: {
@@ -832,10 +972,12 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
 
     setEdges((currentEdges) =>
       currentEdges.map((edge) => {
-        const isPathEdge = highlightedPathIds.has(edge.id);
+        const isPathEdge = activePathIds.has(edge.id);
         const relationKind = String(edge.data?.relationKind || "");
+        const branchColor = typeof edge.data?.branchColor === "string" ? edge.data.branchColor : undefined;
         const baseStyle = getChildEdgeStyle(
-          relationKind ? (relationKind.split(",") as RelationKind[]) : ["biological"]
+          relationKind ? (relationKind.split(",") as RelationKind[]) : ["biological"],
+          branchColor
         );
 
         if (!hasHighlight) {
@@ -845,6 +987,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
             style: {
               ...edge.style,
               ...(edge.id.startsWith("e-family-") ? baseStyle : {}),
+              ...(edge.id.startsWith("e-parent-") && branchColor ? { stroke: branchColor, opacity: 0.42 } : {}),
             },
             zIndex: 0,
           };
@@ -863,7 +1006,7 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
         };
       })
     );
-  }, [highlightedId, highlightedPathIds, setNodes, setEdges]);
+  }, [highlightedId, highlightedPathIds, hoveredFamilyPathIds, hoveredFamilyUnitId, setNodes, setEdges]);
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -1137,6 +1280,8 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
     appliedFilter?.mode === "surname" ||
     (!!surnameInput.trim() && !nameInput.trim() && !hasAddressFilter(selectedAddressFilter));
   const selectedCenter = members.find((member) => member.id === selectedCenterId) || null;
+  const selectedFamilyUnit = familyUnitsForDetails.find((unit) => unit.id === selectedFamilyUnitId) || null;
+  const memberMapForDetails = useMemo(() => new Map(members.map((member) => [member.id, member])), [members]);
 
   return (
     <div
@@ -1364,6 +1509,14 @@ const FamilyTreeGraphInner = memo(function FamilyTreeGraphInner({
           setPickerOpen(false);
         }}
       />
+      <FamilyUnitDetailsDialog
+        open={Boolean(selectedFamilyUnit)}
+        onOpenChange={(open) => {
+          if (!open) setSelectedFamilyUnitId(null);
+        }}
+        familyUnit={selectedFamilyUnit}
+        memberMap={memberMapForDetails}
+      />
     </div>
   );
 });
@@ -1410,6 +1563,76 @@ export function FamilyTreeGraph({ initialData }: FamilyTreeGraphProps) {
         motherName={getMemberName(getPrimaryParentId(selectedMember, "mother"))}
       />
     </>
+  );
+}
+
+function FamilyUnitDetailsDialog({
+  open,
+  onOpenChange,
+  familyUnit,
+  memberMap,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  familyUnit: FamilyUnit | null;
+  memberMap: Map<number, FamilyMemberNode>;
+}) {
+  if (!familyUnit) return null;
+
+  const father = familyUnit.parents.find((parent) => parent.role === "father");
+  const mother = familyUnit.parents.find((parent) => parent.role === "mother");
+  const children = familyUnit.childIds
+    .map((childId) => memberMap.get(childId))
+    .filter((member): member is FamilyMemberNode => Boolean(member));
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>配偶家庭单元</DialogTitle>
+          <DialogDescription>{familyUnit.description}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">父亲</div>
+              <div className="mt-1 font-medium">{father?.name || "未记录"}</div>
+            </div>
+            <div className="rounded-md border p-3">
+              <div className="text-xs text-muted-foreground">母亲</div>
+              <div className="mt-1 font-medium">{mother?.name || "未记录"}</div>
+            </div>
+          </div>
+          <div className="rounded-md border p-3">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-sm font-medium">子女</span>
+              <span className="rounded-full bg-muted px-2 py-0.5 text-xs text-muted-foreground">
+                {familyUnit.childrenCount} 人
+              </span>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              {children.length > 0 ? (
+                children.map((child) => (
+                  <span
+                    key={child.id}
+                    className="rounded-full border px-2.5 py-1 text-sm"
+                    style={{ borderColor: familyUnit.branchColor }}
+                  >
+                    {child.name}
+                  </span>
+                ))
+              ) : (
+                <span className="text-sm text-muted-foreground">暂无可见子女</span>
+              )}
+            </div>
+          </div>
+          <div className="rounded-md border p-3">
+            <div className="text-xs text-muted-foreground">关系类型</div>
+            <div className="mt-1 text-sm">{getRelationKindLabel(familyUnit.relationKinds)}</div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1769,6 +1992,7 @@ function buildFamilyUnits(
   relationships: FamilyRelationship[]
 ): FamilyUnit[] {
   const visibleMemberIds = new Set(visibleMembers.map((member) => member.id));
+  const memberMap = new Map(visibleMembers.map((member) => [member.id, member]));
   const visibleChildRelationships = relationships.filter(
     (relationship) => visibleMemberIds.has(relationship.child_id) && visibleMemberIds.has(relationship.parent_id)
   );
@@ -1793,6 +2017,12 @@ function buildFamilyUnits(
       parentIds: orderedParents,
       childIds: [],
       relationKinds: [],
+      parents: [],
+      childrenCount: 0,
+      branchColor: "",
+      label: "",
+      description: "",
+      isMultiPartnerBranch: false,
     };
 
     if (!existing.childIds.includes(childId)) {
@@ -1806,7 +2036,31 @@ function buildFamilyUnits(
     familyMap.set(key, existing);
   });
 
-  return Array.from(familyMap.values());
+  const parentFamilyCounts = countParentFamilyUnits(Array.from(familyMap.values()));
+  return Array.from(familyMap.values()).map((familyUnit, index) => {
+    const parents = familyUnit.parentIds.map((parentId) => {
+      const relation = familyUnit.childIds
+        .flatMap((childId) => relationshipsByChild.get(childId) || [])
+        .find((item) => item.parentId === parentId);
+      return {
+        id: parentId,
+        name: memberMap.get(parentId)?.name || `#${parentId}`,
+        role: relation?.relationType || "parent",
+      };
+    });
+    const branchColor = getFamilyBranchColor(index);
+    const isMultiPartnerBranch = familyUnit.parentIds.some((parentId) => (parentFamilyCounts.get(parentId) || 0) > 1);
+
+    return {
+      ...familyUnit,
+      parents,
+      childrenCount: familyUnit.childIds.length,
+      branchColor,
+      label: getFamilyUnitLabel(parents, parentFamilyCounts, isMultiPartnerBranch),
+      description: getFamilyUnitDescription(parents, familyUnit.childIds.length, familyUnit.relationKinds),
+      isMultiPartnerBranch,
+    };
+  });
 }
 
 function orderParentIds(relations: ParentRelation[]): number[] {
@@ -1822,6 +2076,57 @@ function orderParentIds(relations: ParentRelation[]): number[] {
   );
 }
 
+function getFamilyBranchColor(index: number): string {
+  const hue = (142 + index * 47) % 360;
+  return `hsl(${hue}, 54%, 45%)`;
+}
+
+function getFamilyUnitLabel(
+  parents: FamilyUnitParent[],
+  parentFamilyCounts: Map<number, number>,
+  isMultiPartnerBranch: boolean
+): string {
+  if (!parents.length) return "家庭";
+
+  if (isMultiPartnerBranch) {
+    const differentiator =
+      parents.find((parent) => (parentFamilyCounts.get(parent.id) || 0) === 1) ||
+      parents.find((parent) => parent.role === "mother") ||
+      parents.find((parent) => parent.role === "father") ||
+      parents[0];
+    return `${getParentRoleShortLabel(differentiator.role)}：${differentiator.name}`;
+  }
+
+  const father = parents.find((parent) => parent.role === "father");
+  const mother = parents.find((parent) => parent.role === "mother");
+  if (father && mother) return `${father.name} / ${mother.name}`;
+
+  return parents.map((parent) => parent.name).join(" / ");
+}
+
+function getFamilyUnitDescription(
+  parents: FamilyUnitParent[],
+  childrenCount: number,
+  relationKinds: RelationKind[]
+): string {
+  const parentText = parents
+    .map((parent) => `${getParentRoleLabel(parent.role)}：${parent.name}`)
+    .join(" / ");
+  return `${parentText || "父母未记录"}；子女 ${childrenCount} 人；关系：${getRelationKindLabel(relationKinds)}`;
+}
+
+function getParentRoleShortLabel(role: ParentRelation["relationType"]): string {
+  if (role === "father") return "父";
+  if (role === "mother") return "母";
+  return "亲";
+}
+
+function getParentRoleLabel(role: ParentRelation["relationType"]): string {
+  if (role === "father") return "父亲";
+  if (role === "mother") return "母亲";
+  return "家长";
+}
+
 function countParentFamilyUnits(familyUnits: FamilyUnit[]): Map<number, number> {
   const counts = new Map<number, number>();
   familyUnits.forEach((familyUnit) => {
@@ -1832,7 +2137,40 @@ function countParentFamilyUnits(familyUnits: FamilyUnit[]): Map<number, number> 
   return counts;
 }
 
-function getChildEdgeStyle(relationKinds: RelationKind[]): Edge["style"] {
+function spreadMultiPartnerFamilyUnits(
+  dagreGraph: dagre.graphlib.Graph,
+  familyUnits: FamilyUnit[],
+  parentFamilyCounts: Map<number, number>
+) {
+  const grouped = new Map<number, FamilyUnit[]>();
+  familyUnits.forEach((familyUnit) => {
+    familyUnit.parentIds.forEach((parentId) => {
+      if ((parentFamilyCounts.get(parentId) || 0) <= 1) return;
+      grouped.set(parentId, [...(grouped.get(parentId) || []), familyUnit]);
+    });
+  });
+
+  grouped.forEach((units) => {
+    const uniqueUnits = Array.from(new Map(units.map((unit) => [unit.id, unit])).values());
+    if (uniqueUnits.length <= 1) return;
+
+    uniqueUnits.sort((a, b) => a.id.localeCompare(b.id));
+    const center = uniqueUnits.reduce((total, unit) => total + (dagreGraph.node(unit.id)?.x || 0), 0) / uniqueUnits.length;
+    const spacing = NODE_WIDTH + FAMILY_NODE_WIDTH + 80;
+
+    uniqueUnits.forEach((unit, index) => {
+      const node = dagreGraph.node(unit.id);
+      if (!node) return;
+      node.x = center + (index - (uniqueUnits.length - 1) / 2) * spacing;
+    });
+  });
+}
+
+function findPrimaryChildFamilyColor(memberId: number, familyUnits: FamilyUnit[]): string | undefined {
+  return familyUnits.find((familyUnit) => familyUnit.childIds.includes(memberId))?.branchColor;
+}
+
+function getChildEdgeStyle(relationKinds: RelationKind[], branchColor = "hsl(var(--muted-foreground))"): Edge["style"] {
   if (relationKinds.includes("adoptive")) {
     return {
       stroke: "#8b5cf6",
@@ -1852,9 +2190,9 @@ function getChildEdgeStyle(relationKinds: RelationKind[]): Edge["style"] {
   }
 
   return {
-    stroke: "hsl(var(--muted-foreground))",
-    strokeWidth: 2,
-    opacity: 0.6,
+    stroke: branchColor,
+    strokeWidth: 2.4,
+    opacity: 0.72,
   };
 }
 

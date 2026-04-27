@@ -1,6 +1,6 @@
 "use client";
 
-import { memo } from "react";
+import { memo, type CSSProperties } from "react";
 import { Handle, Position } from "@xyflow/react";
 import { cn } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
@@ -60,6 +60,11 @@ function FamilyMemberNodeComponent({ data: nodeData }: FamilyNodeProps) {
                     : "bg-pink-300/40"
                   : "bg-border"
         )}
+        style={
+          nodeData.branchColor && !nodeData.isHighlighted && !nodeData.isPathHighlighted
+            ? ({ backgroundColor: nodeData.branchColor } as CSSProperties)
+            : undefined
+        }
       />
 
       <Handle
