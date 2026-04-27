@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type KeyboardEvent,
   type MouseEvent,
 } from "react";
 import { createClient } from "@/lib/supabase/client";
@@ -203,6 +204,14 @@ const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node
   const handleOpenDetails = useCallback(() => {
     data.onOpenDetails?.(id);
   }, [data, id]);
+  const handleKeyDown = useCallback(
+    (event: KeyboardEvent<HTMLDivElement>) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      data.onOpenDetails?.(id);
+    },
+    [data, id]
+  );
   const handleMouseEnter = useCallback(() => {
     data.onHoverFamilyUnit?.(id);
   }, [data, id]);
@@ -211,13 +220,15 @@ const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node
   }, [data]);
 
   return (
-    <button
-      type="button"
+    <div
+      role="button"
+      tabIndex={0}
       onClick={handleOpenDetails}
+      onKeyDown={handleKeyDown}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       className={cn(
-        "relative flex h-10 w-[118px] items-center justify-center gap-1 rounded-full border bg-background px-3 text-xs shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md",
+        "relative flex h-10 w-[118px] cursor-pointer items-center justify-center gap-1 rounded-full border bg-background px-3 text-xs shadow-sm transition-all duration-200 hover:-translate-y-0.5 hover:shadow-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
         data.isDimmed && "opacity-25 grayscale",
         data.isPathHighlighted && "z-40 scale-105 ring-2 ring-amber-300/70",
         hasAdoptive
@@ -251,7 +262,7 @@ const FamilyUnitNode = memo(function FamilyUnitNode({ id, data }: NodeProps<Node
           {data.collapsed ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
         </button>
       )}
-    </button>
+    </div>
   );
 });
 
